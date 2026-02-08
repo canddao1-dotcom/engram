@@ -496,10 +496,14 @@ export class AgentMemory {
     const relevantItems = [];
     const recentItems = [];
 
+    const MAX_EP_CHARS = 300;
     for (const item of merged) {
       const ep = await this.storage.getEpisode(item.id);
       if (!ep) continue;
-      const formatted = `[${ep.type}] (${_relativeTime(ep.createdAt, now)}) ${ep.text}`;
+      const truncText = ep.text.length > MAX_EP_CHARS
+        ? ep.text.slice(0, MAX_EP_CHARS).replace(/\n[^\n]*$/, '') + '...'
+        : ep.text;
+      const formatted = `[${ep.type}] (${_relativeTime(ep.createdAt, now)}) ${truncText}`;
       if (item.isRecent) {
         recentItems.push(formatted);
       } else {
@@ -519,11 +523,10 @@ export class AgentMemory {
       output += recentItems.join('\n') + '\n';
     }
 
-    // 6. Truncate to token budget
-    const tokens = tokenize(output);
-    if (tokens.length > maxTokens) {
-      // Rough truncation: estimate ~4 chars per token
-      const charBudget = maxTokens * 4;
+    // 6. Truncate to token budget (LLM tokens ≈ chars / 3.5)
+    const estimatedTokens = Math.ceil(output.length / 3.5);
+    if (estimatedTokens > maxTokens) {
+      const charBudget = Math.floor(maxTokens * 3.5);
       output = output.slice(0, charBudget);
       // Trim to last complete line
       const lastNewline = output.lastIndexOf('\n');
@@ -625,18 +628,22 @@ export class AgentMemory {
       ? candidates
       : candidates.filter(c => c.doc.type !== 'checkpoint');
 
-    // Load and format
+    // Load and format — truncate each episode to max 300 chars, use LLM token estimate
+    const MAX_EP_CHARS = 300;
     let output = '## Post-Compaction Context\n';
-    let tokenCount = 0;
+    let charCount = output.length;
+    const charBudget = Math.floor(maxTokens * 3.5);
 
     for (const { id } of filtered) {
       const ep = await this.storage.getEpisode(id);
       if (!ep) continue;
-      const line = `[${ep.type}] (${_relativeTime(ep.createdAt, now)}) ${ep.text}\n`;
-      const lineTokens = tokenize(line).length;
-      if (tokenCount + lineTokens > maxTokens) break;
+      const truncText = ep.text.length > MAX_EP_CHARS
+        ? ep.text.slice(0, MAX_EP_CHARS).replace(/\n[^\n]*$/, '') + '...'
+        : ep.text;
+      const line = `[${ep.type}] (${_relativeTime(ep.createdAt, now)}) ${truncText}\n`;
+      if (charCount + line.length > charBudget) break;
       output += line;
-      tokenCount += lineTokens;
+      charCount += line.length;
     }
 
     return output.trim();
