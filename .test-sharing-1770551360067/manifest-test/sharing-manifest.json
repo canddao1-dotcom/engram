@@ -1,0 +1,10 @@
+{
+  "agentId": "test",
+  "publicKey": null,
+  "shares": [
+    {
+      "id": "share_1"
+    }
+  ],
+  "received": []
+}

@@ -9,8 +9,9 @@ import { QueryEngine } from './query.js';
 import { FileStorage } from './storage/file.js';
 import { parseTemporalQuery } from './temporal.js';
 import { initSynonyms, loadCustomSynonyms } from './synonyms.js';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { encrypt, decrypt, deriveKey, generateKey } from '../scripts/encryption.js';
 
 /**
  * Format a timestamp as a human-readable relative time string.
@@ -42,6 +43,7 @@ export class AgentMemory {
    * @param {number} opts.maxChunkTokens - max tokens per chunk (default: 256)
    * @param {number} opts.synonymWeight - weight for synonym matches (default: 0.5)
    * @param {string} opts.synonymsFile - path to custom synonyms JSON file (optional)
+   * @param {object} opts.encryption - { enabled: true, key: '...' } or { enabled: true, password: '...' }
    */
   constructor(opts = {}) {
     this.agentId = opts.agentId || 'default';
@@ -57,6 +59,11 @@ export class AgentMemory {
     this._basePath = basePath;
     this.storage = opts.redis ? null : new FileStorage(basePath);
 
+    // Encryption
+    this._encryptionConfig = opts.encryption || null;
+    this._encryptionKey = null; // resolved hex key
+    this._encryptionSalt = null; // for password-based derivation
+
     // Query engine
     this.engine = new QueryEngine({
       recencyWeight: opts.recencyWeight,
@@ -70,8 +77,114 @@ export class AgentMemory {
    * Initialize storage and load/rebuild index.
    * Uses incremental indexing when a persisted BM25 index exists.
    */
+  /**
+   * Resolve the encryption key from config, env, or key file.
+   */
+  _resolveEncryptionKey() {
+    if (!this._encryptionConfig || !this._encryptionConfig.enabled) return;
+
+    // Direct key
+    if (this._encryptionConfig.key) {
+      this._encryptionKey = this._encryptionConfig.key;
+      return;
+    }
+
+    // Password-based derivation
+    if (this._encryptionConfig.password) {
+      const saltPath = join(this._basePath, 'engram.salt');
+      let salt = null;
+      if (existsSync(saltPath)) {
+        salt = readFileSync(saltPath, 'utf-8').trim();
+      }
+      const result = deriveKey(this._encryptionConfig.password, salt || undefined);
+      this._encryptionKey = result.key;
+      this._encryptionSalt = result.salt;
+      // Persist salt if new — done lazily in init() since dir may not exist yet
+      this._pendingSaltWrite = !salt ? { path: saltPath, salt: result.salt } : null;
+      return;
+    }
+
+    // Env var
+    if (process.env.ENGRAM_KEY) {
+      this._encryptionKey = process.env.ENGRAM_KEY;
+      return;
+    }
+
+    // Key file
+    const keyPath = join(this._basePath, 'engram.key');
+    if (existsSync(keyPath)) {
+      this._encryptionKey = readFileSync(keyPath, 'utf-8').trim();
+      return;
+    }
+
+    throw new Error('Encryption enabled but no key provided. Set key, password, ENGRAM_KEY env, or create <dataDir>/engram.key');
+  }
+
+  /**
+   * Encrypt episode content and tags (if encryption enabled).
+   * Returns a new episode object with encrypted fields.
+   */
+  _encryptEpisode(episode) {
+    if (!this._encryptionKey) return episode;
+    const ep = { ...episode };
+    const encContent = encrypt(ep.text, this._encryptionKey);
+    ep.text = JSON.stringify(encContent);
+    ep._encrypted = true;
+    if (ep.tags && ep.tags.length > 0) {
+      const encTags = encrypt(JSON.stringify(ep.tags), this._encryptionKey);
+      ep.tags = [JSON.stringify(encTags)];
+      ep._tagsEncrypted = true;
+    }
+    return ep;
+  }
+
+  /**
+   * Decrypt episode content and tags (if encrypted).
+   * Returns a new episode object with decrypted fields.
+   */
+  _decryptEpisode(episode) {
+    if (!episode._encrypted) return episode;
+    if (!this._encryptionKey) return episode; // can't decrypt without key
+    const ep = { ...episode };
+    const encContent = JSON.parse(ep.text);
+    ep.text = decrypt(encContent, this._encryptionKey);
+    if (ep._tagsEncrypted && ep.tags && ep.tags.length === 1) {
+      try {
+        const encTags = JSON.parse(ep.tags[0]);
+        ep.tags = JSON.parse(decrypt(encTags, this._encryptionKey));
+      } catch { /* leave as-is */ }
+    }
+    ep._encrypted = false;
+    ep._tagsEncrypted = false;
+    return ep;
+  }
+
+  get encryptionEnabled() {
+    return !!this._encryptionKey;
+  }
+
+  /**
+   * Load and decrypt a single episode from storage.
+   */
+  async _loadEpisode(id) {
+    const ep = await this.storage.getEpisode(id);
+    return ep ? this._decryptEpisode(ep) : null;
+  }
+
+  /**
+   * Load and decrypt all episodes from storage.
+   */
+  async _loadAllEpisodes() {
+    const all = await this.storage.getAllEpisodes();
+    if (!this._encryptionKey) return all;
+    return all.map(ep => { try { return this._decryptEpisode(ep); } catch { return ep; } });
+  }
+
   async init() {
     if (this._initialized) return;
+
+    // Resolve encryption key (sync parts)
+    this._resolveEncryptionKey();
 
     // Initialize synonyms: defaults → env → agent dataDir → explicit file
     await initSynonyms();
@@ -88,6 +201,13 @@ export class AgentMemory {
       this.storage = new RedisStorage(this._redisConfig);
     }
     await this.storage.init();
+
+    // Persist salt if needed (after storage creates directories)
+    if (this._pendingSaltWrite) {
+      const { writeFileSync } = await import('fs');
+      writeFileSync(this._pendingSaltWrite.path, this._pendingSaltWrite.salt);
+      this._pendingSaltWrite = null;
+    }
 
     // Try incremental init
     let didIncremental = false;
@@ -108,7 +228,12 @@ export class AgentMemory {
           // We need TF data for search — reload all episodes to populate TF maps
           // But only if we have docs. For small sets this is fast.
           // For the incremental case, reload all to get TF (required for scoring).
-          const allEpisodes = await this.storage.getAllEpisodes();
+          let allEpisodes = await this.storage.getAllEpisodes();
+          if (this._encryptionKey) {
+            allEpisodes = allEpisodes.map(ep => {
+              try { return this._decryptEpisode(ep); } catch { return ep; }
+            });
+          }
           this.engine.rebuild(allEpisodes);
 
           // Actually for true incremental, we'd need to persist TF too.
@@ -123,7 +248,13 @@ export class AgentMemory {
 
     if (!didIncremental) {
       // Full rebuild (v1.0 behavior / fallback)
-      const episodes = await this.storage.getAllEpisodes();
+      let episodes = await this.storage.getAllEpisodes();
+      // Decrypt for in-memory index if encryption enabled
+      if (this._encryptionKey) {
+        episodes = episodes.map(ep => {
+          try { return this._decryptEpisode(ep); } catch { return ep; }
+        });
+      }
       this.engine.rebuild(episodes);
       this._initMode = 'full';
     }
@@ -166,10 +297,13 @@ export class AgentMemory {
         sourceId,
         supersedes: i === 0 ? supersedes : undefined, // only first chunk carries supersedes
       });
-      await this.storage.saveEpisode(ep);
-      await this.storage.addToTagIndex(ep);
+      // Index the plaintext version in memory
       this.engine.addDocument(ep);
-      episodes.push(ep);
+      // Encrypt before persisting to disk
+      const diskEp = this._encryptEpisode(ep);
+      await this.storage.saveEpisode(diskEp);
+      await this.storage.addToTagIndex(diskEp);
+      episodes.push(ep); // return plaintext version
     }
 
     // Mark superseded episodes
@@ -229,11 +363,14 @@ export class AgentMemory {
     // Lazy load: only fetch full episodes that appear in results
     const episodes = [];
     for (const r of results) {
-      const ep = await this.storage.getEpisode(r.id);
+      let ep = await this.storage.getEpisode(r.id);
       if (ep) {
+        // Decrypt if needed
+        ep = this._decryptEpisode(ep);
         ep.lastAccessedAt = Date.now();
         ep.accessCount = (ep.accessCount || 0) + 1;
-        await this.storage.saveEpisode(ep);
+        // Re-encrypt before saving back
+        await this.storage.saveEpisode(this._encryptEpisode(ep));
         episodes.push({ ...ep, _score: r.score, _bm25: r.bm25, _recency: r.recency });
       }
     }
@@ -273,7 +410,7 @@ export class AgentMemory {
    */
   async getRecent(limit = 10) {
     await this.init();
-    const all = await this.storage.getAllEpisodes();
+    const all = await this._loadAllEpisodes();
     all.sort((a, b) => b.createdAt - a.createdAt);
     return all.slice(0, limit);
   }
@@ -288,7 +425,7 @@ export class AgentMemory {
     const ids = await this.storage.getByTag(tag);
     const episodes = [];
     for (const id of ids) {
-      const ep = await this.storage.getEpisode(id);
+      const ep = await this._loadEpisode(id);
       if (ep) episodes.push(ep);
     }
     return episodes;
@@ -315,7 +452,7 @@ export class AgentMemory {
   async getStats() {
     await this.init();
     const storageStats = await this.storage.getStats();
-    const all = await this.storage.getAllEpisodes();
+    const all = await this._loadAllEpisodes();
 
     const typeCounts = {};
     const tagCounts = {};
@@ -349,7 +486,7 @@ export class AgentMemory {
   async prune(opts = {}) {
     await this.init();
     const { keep = 1000, maxAgeDays = 90, minImportance = 0.05 } = opts;
-    const all = await this.storage.getAllEpisodes();
+    const all = await this._loadAllEpisodes();
     const now = Date.now();
     const DAY = 86400000;
 
@@ -391,7 +528,7 @@ export class AgentMemory {
 
     if (after || before) {
       if (!remaining) {
-        const all = await this.storage.getAllEpisodes();
+        const all = await this._loadAllEpisodes();
         return all
           .filter(ep => (!after || ep.createdAt >= after) && (!before || ep.createdAt <= before))
           .sort((a, b) => b.createdAt - a.createdAt)
@@ -413,7 +550,7 @@ export class AgentMemory {
   async summarize(ids, summaryText, opts = {}) {
     const tags = new Set(opts.tags || ['summary']);
     for (const id of ids) {
-      const ep = await this.storage.getEpisode(id);
+      const ep = await this._loadEpisode(id);
       if (ep) for (const t of ep.tags) tags.add(t);
     }
 
@@ -498,7 +635,7 @@ export class AgentMemory {
 
     const MAX_EP_CHARS = 300;
     for (const item of merged) {
-      const ep = await this.storage.getEpisode(item.id);
+      const ep = await this._loadEpisode(item.id);
       if (!ep) continue;
       const truncText = ep.text.length > MAX_EP_CHARS
         ? ep.text.slice(0, MAX_EP_CHARS).replace(/\n[^\n]*$/, '') + '...'
@@ -635,7 +772,7 @@ export class AgentMemory {
     const charBudget = Math.floor(maxTokens * 3.5);
 
     for (const { id } of filtered) {
-      const ep = await this.storage.getEpisode(id);
+      const ep = await this._loadEpisode(id);
       if (!ep) continue;
       const truncText = ep.text.length > MAX_EP_CHARS
         ? ep.text.slice(0, MAX_EP_CHARS).replace(/\n[^\n]*$/, '') + '...'
@@ -667,7 +804,7 @@ export class AgentMemory {
     const cutoff = now - hours * 3600000;
 
     // Get episodes within time window
-    const all = await this.storage.getAllEpisodes();
+    const all = await this._loadAllEpisodes();
     const recent = all
       .filter(ep => ep.createdAt >= cutoff && ep.type !== 'summary')
       .sort((a, b) => a.createdAt - b.createdAt);

@@ -7,6 +7,7 @@
 import { AgentMemory } from '../src/agent.js';
 import { readTranscript, digestTranscript } from '../src/transcript.js';
 import { resolve } from 'path';
+import { existsSync, readFileSync } from 'fs';
 
 // Parse args
 const args = process.argv.slice(2);
@@ -23,7 +24,23 @@ for (let i = 0; i < args.length; i++) {
 }
 
 const basePath = flags.path || resolve(process.cwd(), 'memory/engram');
-const mem = new AgentMemory({ agentId: flags.agent || 'default', basePath });
+
+// Resolve encryption config from flags/env/keyfile
+function resolveEncryption() {
+  const wantEncrypt = flags.encrypt === 'true' || flags.decrypt === 'true';
+  if (flags.key) return { enabled: true, key: flags.key };
+  if (flags.password) return { enabled: true, password: flags.password };
+  if (process.env.ENGRAM_KEY) return wantEncrypt ? { enabled: true, key: process.env.ENGRAM_KEY } : null;
+  const keyPath = resolve(basePath, 'engram.key');
+  if (existsSync(keyPath)) {
+    const key = readFileSync(keyPath, 'utf-8').trim();
+    return wantEncrypt ? { enabled: true, key } : null;
+  }
+  return wantEncrypt ? { enabled: true } : null; // will fail in init if no key source
+}
+
+const encConfig = resolveEncryption();
+const mem = new AgentMemory({ agentId: flags.agent || 'default', basePath, encryption: encConfig });
 
 async function main() {
   switch (command) {

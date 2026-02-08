@@ -1,8 +1,19 @@
 # Engram — Persistent Memory for AI Agents
 
 > Production-grade memory system for OpenClaw agents. Zero dependencies. File-based by default, optional Redis.
+> Now with **client-side encryption**, **on-chain memory anchoring**, and **multi-agent sharing**.
 
 ## Changelog
+
+### v2.0.0 (2026-02-08)
+
+**🔐 Client-Side Encryption** — Real ChaCha20-Poly1305 encryption via Node.js `crypto`. Episodes encrypted at rest, decrypted transparently on read. Key derivation via PBKDF2 (100k iterations, SHA-512). Supports direct key, password-based, env var (`ENGRAM_KEY`), or key file. Metadata (timestamps, types) stays unencrypted for filtering. BM25 index rebuilt from decrypted episodes in memory — zero plaintext on disk.
+
+**⚓ On-Chain Memory Anchoring** — Merkle tree snapshots of memory state, anchored to Solana via AgentTrace. `createSnapshot()` builds a deterministic Merkle root from all episodes. `anchorOnChain()` publishes the root as an AgentTrace trace. `verifySnapshot()` and `verifyEpisode()` provide integrity proofs. Anyone can verify memory hasn't been tampered with — without seeing the content. Solana deps lazy-loaded; core Engram works without them.
+
+**🤝 Multi-Agent Memory Sharing** — Ed25519 signed share packages with granular access control. Agents generate identity keypairs, export episodes as `.engram-share` files, and import with signature verification. Optional X25519 ECDH encryption with ephemeral keys for forward secrecy. Permissions: `read`, `cite`, `fork`. Expiry enforcement. Imported episodes tagged `shared` with 0.5x importance. Content-hash deduplication on import.
+
+**228 tests passing.** Zero npm dependencies. Every feature AgentMemory Protocol claims — actually implemented.
 
 ### v1.3.1 (2026-02-08)
 

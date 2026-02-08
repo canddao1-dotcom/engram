@@ -1,0 +1,22 @@
+{
+  "id": "ep_alice-share_1770551360093_1b794b09",
+  "text": "Water boils at 100°C",
+  "type": "fact",
+  "tags": [
+    "science"
+  ],
+  "importance": 0.5,
+  "agentId": "alice-share",
+  "metadata": {},
+  "chunkIndex": 0,
+  "totalChunks": 1,
+  "sourceId": "767f01a6c946",
+  "createdAt": 1770551360093,
+  "lastAccessedAt": 1770551360093,
+  "accessCount": 0,
+  "tokens": [
+    "wat",
+    "boil",
+    "100"
+  ]
+}

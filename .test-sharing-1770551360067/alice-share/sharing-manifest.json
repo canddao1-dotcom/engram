@@ -1,0 +1,19 @@
+{
+  "agentId": "alice",
+  "publicKey": "MCowBQYDK2VwAyEAGOQU5dcIXeyLNWAjbS+TThaqwegnwiPBiUJXGvODeco=",
+  "shares": [
+    {
+      "id": "share_f5daf78005ad4be4",
+      "episodeIds": [
+        "ep_alice-share_1770551360089_70564947",
+        "ep_alice-share_1770551360093_1b794b09"
+      ],
+      "recipientAgentId": null,
+      "recipientPublicKey": null,
+      "permissions": "read",
+      "expiresAt": null,
+      "createdAt": "2026-02-08T11:49:20.099Z"
+    }
+  ],
+  "received": []
+}

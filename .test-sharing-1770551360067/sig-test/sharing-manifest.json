@@ -1,0 +1,18 @@
+{
+  "agentId": "sig-test",
+  "publicKey": "MCowBQYDK2VwAyEAI4rVvpkOcyHU/jmOpZlrihkR4PPqjxXGaEgXbSACYoE=",
+  "shares": [
+    {
+      "id": "share_bc6211c223e07f83",
+      "episodeIds": [
+        "ep_sig-test_1770551360119_62b4e207"
+      ],
+      "recipientAgentId": null,
+      "recipientPublicKey": null,
+      "permissions": "read",
+      "expiresAt": null,
+      "createdAt": "2026-02-08T11:49:20.123Z"
+    }
+  ],
+  "received": []
+}

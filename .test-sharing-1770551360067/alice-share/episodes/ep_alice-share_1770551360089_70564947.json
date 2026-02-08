@@ -1,0 +1,22 @@
+{
+  "id": "ep_alice-share_1770551360089_70564947",
+  "text": "The capital of France is Paris",
+  "type": "fact",
+  "tags": [
+    "geography"
+  ],
+  "importance": 0.5,
+  "agentId": "alice-share",
+  "metadata": {},
+  "chunkIndex": 0,
+  "totalChunks": 1,
+  "sourceId": "9739d43ee5ea",
+  "createdAt": 1770551360089,
+  "lastAccessedAt": 1770551360089,
+  "accessCount": 0,
+  "tokens": [
+    "capital",
+    "france",
+    "pari"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "id": "ep_bob-import_1770551360109_a951c9cf",
+  "text": "The capital of France is Paris",
+  "type": "fact",
+  "tags": [
+    "geography",
+    "shared"
+  ],
+  "importance": 0.25,
+  "agentId": "bob-import",
+  "metadata": {
+    "shared": true,
+    "sharedFrom": "alice",
+    "originalId": "ep_alice-share_1770551360089_70564947",
+    "importedAt": "2026-02-08T11:49:20.109Z"
+  },
+  "chunkIndex": 0,
+  "totalChunks": 1,
+  "sourceId": "9739d43ee5ea",
+  "createdAt": 1770551360109,
+  "lastAccessedAt": 1770551360109,
+  "accessCount": 0,
+  "tokens": [
+    "capital",
+    "france",
+    "pari"
+  ]
+}
