@@ -8,6 +8,7 @@ export { QueryEngine } from './query.js';
 export { FileStorage } from './storage/file.js';
 export { RedisStorage } from './storage/redis.js';
 export { parseTemporalQuery } from './temporal.js';
+export { expandQuery, addSynonymGroup, loadCustomSynonyms } from './synonyms.js';
 export {
   tokenize, chunk, termFrequencies, idf, bm25Score,
   createEpisode, generateEpisodeId, contentHash, EPISODE_TYPES,

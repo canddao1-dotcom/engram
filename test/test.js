@@ -7,7 +7,9 @@ import { tokenize, chunk, idf, bm25Score, createEpisode, contentHash, termFreque
 import { QueryEngine } from '../src/query.js';
 import { parseTemporalQuery } from '../src/temporal.js';
 import { AgentMemory } from '../src/agent.js';
-import { rm } from 'fs/promises';
+import { expandQuery, addSynonymGroup } from '../src/synonyms.js';
+import { FileStorage } from '../src/storage/file.js';
+import { rm, readFile } from 'fs/promises';
 import { join } from 'path';
 
 let passed = 0, failed = 0;
@@ -27,8 +29,8 @@ section('Core: Tokenizer');
   assert(!tokens.includes('the'), 'removes stop words');
   assert(tokens.includes('quick'), 'keeps content words');
   assert(tokens.includes('brown'), 'keeps adjectives');
-  assert(tokens.includes('jump'), 'stems -ed suffix'); // jumped → jump
-  assert(tokens.includes('dog'), 'stems -s suffix');   // dogs → dog
+  assert(tokens.includes('jump'), 'stems -ed suffix');
+  assert(tokens.includes('dog'), 'stems -s suffix');
 }
 
 section('Core: Chunker');
@@ -74,6 +76,31 @@ section('Core: Content Hash');
   assert(h1 !== h3, 'different text → different hash');
 }
 
+// ─── Synonym Tests ───────────────────────────────────────────────
+section('Synonyms: expandQuery');
+{
+  const r1 = expandQuery('FXRP allocation');
+  assert(r1.expanded.length > 0, `FXRP expands to synonyms: ${r1.expanded.join(', ')}`);
+  assert(r1.expanded.some(t => t === 'flare' || t === 'xrp' || t === 'fasset'), 'FXRP includes Flare/XRP synonyms');
+
+  const r2 = expandQuery('sFLR staking yield');
+  assert(r2.expanded.length > 0, `sFLR expands: ${r2.expanded.join(', ')}`);
+
+  const r3 = expandQuery('random unrelated query');
+  // May or may not expand, but shouldn't crash
+  assert(Array.isArray(r3.expanded), 'unrelated query returns array');
+
+  const r4 = expandQuery('LP APY');
+  assert(r4.expanded.length > 0, 'DeFi acronyms expand');
+}
+
+section('Synonyms: addSynonymGroup');
+{
+  addSynonymGroup(['testtoken', 'TT', 'test coin']);
+  const r = expandQuery('testtoken price');
+  assert(r.expanded.some(t => t === 'tt' || t === 'test' || t === 'coin'), 'custom synonym group works');
+}
+
 // ─── Query Engine Tests ──────────────────────────────────────────
 section('QueryEngine');
 {
@@ -101,6 +128,35 @@ section('QueryEngine');
 
   engine.removeDocument(ep1.id);
   assert(engine.totalDocs === 2, 'removed document');
+}
+
+section('QueryEngine: Synonym search');
+{
+  const engine = new QueryEngine({ recencyWeight: 0.0, synonymWeight: 0.5 });
+
+  // Episode uses "Flare XRP position" terminology
+  const ep1 = createEpisode('Opened a new Flare XRP position worth 5000 tokens', { type: 'position', tags: ['fxrp'] });
+  // Episode uses "FXRP" terminology
+  const ep2 = createEpisode('FXRP allocation increased to 10000', { type: 'position', tags: ['fxrp'] });
+  const ep3 = createEpisode('Unrelated Bitcoin discussion about mining', { type: 'event', tags: ['btc'] });
+
+  engine.addDocument(ep1);
+  engine.addDocument(ep2);
+  engine.addDocument(ep3);
+
+  // Search for "FXRP allocation" should find both FXRP and Flare XRP episodes
+  const results = engine.search('FXRP allocation', { limit: 5 });
+  assert(results.length >= 1, `synonym search returns results: ${results.length}`);
+
+  const resultIds = results.map(r => r.id);
+  assert(resultIds.includes(ep2.id), 'finds exact match (FXRP)');
+  assert(resultIds.includes(ep1.id), 'finds synonym match (Flare XRP)');
+  assert(!resultIds.includes(ep3.id), 'does not match unrelated');
+
+  // Exact match should score higher
+  const ep2Result = results.find(r => r.id === ep2.id);
+  const ep1Result = results.find(r => r.id === ep1.id);
+  assert(ep2Result.bm25 >= ep1Result.bm25, 'exact match scores higher than synonym match');
 }
 
 // ─── Temporal Tests ──────────────────────────────────────────────
@@ -177,6 +233,103 @@ section('Integration: AgentMemory');
     assert(typeof hooks.onTrade === 'function', 'hooks.onTrade exists');
 
     console.log('\n✓ Integration tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+// ─── Incremental Index Test ──────────────────────────────────────
+section('Incremental: BM25 index persistence');
+{
+  const testPath = join(process.cwd(), '.engram-incr-test-' + Date.now());
+
+  try {
+    // Phase 1: Create memory and store episodes
+    const mem1 = new AgentMemory({ agentId: 'test', basePath: testPath });
+    await mem1.remember('First memory about Flare tokens', { type: 'fact', tags: ['flare'] });
+    await mem1.remember('Second memory about Sceptre staking', { type: 'fact', tags: ['sceptre'] });
+
+    // Verify BM25 index was persisted
+    const indexPath = join(testPath, 'index', 'bm25-index.json');
+    const indexData = await readFile(indexPath, 'utf-8');
+    const parsed = JSON.parse(indexData);
+    assert(parsed.version === '1.1', 'BM25 index persisted with version');
+    assert(parsed.totalDocs === 2, `persisted index has ${parsed.totalDocs} docs`);
+    assert(parsed.lastIndexedTimestamp > 0, 'has lastIndexedTimestamp');
+
+    // Phase 2: Create new AgentMemory instance (simulates restart)
+    const mem2 = new AgentMemory({ agentId: 'test', basePath: testPath });
+    await mem2.init();
+    assert(mem2.engine.totalDocs === 2, 'restored 2 docs from persisted index');
+
+    // Add a new episode
+    await mem2.remember('Third memory about Upshift vaults', { type: 'fact', tags: ['upshift'] });
+    assert(mem2.engine.totalDocs === 3, 'incremental add works');
+
+    // Verify search still works after reload
+    const results = mem2.engine.search('Flare tokens', { limit: 5 });
+    assert(results.length > 0, 'search works after index reload');
+
+    // Phase 3: Verify index updated on disk
+    const indexData2 = await readFile(indexPath, 'utf-8');
+    const parsed2 = JSON.parse(indexData2);
+    assert(parsed2.totalDocs === 3, 'updated index has 3 docs');
+
+    console.log('\n✓ Incremental index tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+// ─── Synonym Integration Test ────────────────────────────────────
+section('Synonym Integration: FXRP ↔ Flare XRP');
+{
+  const testPath = join(process.cwd(), '.engram-syn-test-' + Date.now());
+
+  try {
+    const mem = new AgentMemory({ agentId: 'test', basePath: testPath });
+
+    // Store with "Flare XRP position" text
+    await mem.remember('Opened a new Flare XRP position worth 5000 tokens on Enosys', { type: 'position', tags: ['fxrp'] });
+
+    // Search with "FXRP allocation" — should find it via synonyms
+    const results = await mem.recall('FXRP allocation', { limit: 5 });
+    assert(results.length > 0, 'synonym search finds "Flare XRP" when querying "FXRP"');
+    assert(results[0].text.includes('Flare XRP'), 'correct episode returned via synonym');
+
+    console.log('\n✓ Synonym integration tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+// ─── Lazy Loading Test ───────────────────────────────────────────
+section('Lazy Loading: episodes loaded on-demand');
+{
+  const testPath = join(process.cwd(), '.engram-lazy-test-' + Date.now());
+
+  try {
+    const mem = new AgentMemory({ agentId: 'test', basePath: testPath });
+    await mem.remember('Memory alpha about trading', { type: 'trade', tags: ['trading'] });
+    await mem.remember('Memory beta about staking', { type: 'fact', tags: ['staking'] });
+    await mem.remember('Memory gamma about bridging', { type: 'fact', tags: ['bridge'] });
+
+    // The engine should have docs indexed but recall only loads matching ones
+    assert(mem.engine.totalDocs === 3, 'all 3 indexed');
+
+    // Search for just "trading" — should only load the matching episode
+    const results = await mem.recall('trading', { limit: 5 });
+    assert(results.length >= 1, 'recall returns matching episodes');
+    assert(results[0].text.includes('trading'), 'loaded correct episode on-demand');
+
+    // Engine docs have metadata but we verify lazy loading by checking
+    // that recall fetches full episodes from storage (not from engine.docs)
+    const doc = mem.engine.docs.get(results[0].id);
+    assert(doc !== undefined, 'engine has doc metadata');
+    assert(doc.tf instanceof Map, 'engine has TF for scoring');
+    assert(!doc.text, 'engine does NOT store full text (lazy)');
+
+    console.log('\n✓ Lazy loading tests passed');
   } finally {
     await rm(testPath, { recursive: true, force: true });
   }

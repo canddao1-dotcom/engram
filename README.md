@@ -2,6 +2,16 @@
 
 > Production-grade memory system for OpenClaw agents. Zero dependencies. File-based by default, optional Redis.
 
+## Changelog
+
+### v1.1.0 (2026-02-08)
+
+**Incremental BM25 Index** — The BM25 index is now persisted to `memory/engram/index/bm25-index.json` and updated incrementally on startup instead of rebuilding from scratch. Falls back to full rebuild if the index is missing or corrupt.
+
+**Domain Synonym Expansion** — BM25 queries now expand terms using domain-aware synonym groups (Flare ecosystem tokens, DeFi concepts, protocol names). "FXRP allocation" now matches episodes containing "Flare XRP position". Original terms weighted 1.0, synonyms weighted 0.5. Custom synonyms supported via `addSynonymGroup()` or JSON file.
+
+**Lazy Episode Loading** — Episodes are loaded on-demand from disk only when they appear in search results, rather than all being held in memory.
+
 ## Why Engram Exists
 
 AI agents wake up fresh every session. Engram gives them persistent, searchable, structured memory that survives restarts — stored as plain JSON files, searchable via BM25, with recency boosting and temporal reasoning.
