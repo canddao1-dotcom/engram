@@ -96,27 +96,25 @@ flowchart TB
 Encrypt memories at rest with ChaCha20-Poly1305. Zero plaintext on disk.
 
 ```javascript
-import { generateKey, deriveKey, encrypt, decrypt, EncryptedStorage } from './scripts/encryption.js';
+import { AgentMemory } from './src/index.js';
+import { generateKey, deriveKey, encrypt, decrypt } from './scripts/encryption.js';
 
-// Generate a random key
-const key = generateKey(); // 256-bit hex key
+// Option 1: Transparent encryption via AgentMemory (recommended)
+const mem = new AgentMemory({
+  agentId: 'my-agent',
+  basePath: './memory/engram',
+  encryption: { enabled: true, password: 'my-secret' },  // PBKDF2 → ChaCha20
+});
+await mem.remember('sensitive trade data');  // Encrypted on disk automatically
 
-// Or derive from password
-const { key, salt } = deriveKey('my-secret-password');
+// Option 2: Low-level encrypt/decrypt
+const key = generateKey();                          // 256-bit hex key
+const { key: k2, salt } = deriveKey('password');    // Or derive from password
+const sealed = encrypt('sensitive memory', key);    // → { nonce, ciphertext, tag }
+const plain = decrypt(sealed, key);                 // → original text
 
-// Low-level encrypt/decrypt
-const sealed = encrypt('sensitive memory', key);
-// → { nonce, ciphertext, tag } (all hex)
-const plain = decrypt(sealed, key);
-
-// Full encrypted storage (drop-in replacement for FileStorage)
-const store = new EncryptedStorage('/path/to/data', { key });
-// or: new EncryptedStorage(dir, { password: 'secret' })
-// or: new EncryptedStorage(dir, { keyFile: '/path/to/keyfile' })
-// or: set ENGRAM_KEY env var
-
-await store.save(episode);        // Encrypted on disk
-const ep = await store.load(id);  // Decrypted transparently
+// Wrong key is rejected (authenticated encryption)
+try { decrypt(sealed, generateKey()); } catch (e) { /* auth failed */ }
 ```
 
 **Key features:**
@@ -144,9 +142,10 @@ const proof = await verifyEpisode('/path/to/engram/data', snapshot.snapshotId, e
 // → { valid: true, proof: [...], root, leaf }
 
 // Anchor to Solana (requires AgentTrace program)
-const tx = await anchorOnChain('/path/to/engram/data', snapshot.snapshotId, {
-  keypairPath: '~/.config/solana/id.json',
+const tx = await anchorOnChain(snapshot, {
+  agentId: 'my-agent',
   rpcUrl: 'https://api.mainnet-beta.solana.com',
+  walletPath: '~/.config/solana/id.json',
 });
 ```
 
@@ -168,32 +167,29 @@ import {
   grantAccess, revokeAccess
 } from './scripts/sharing.js';
 
-// Each agent generates an identity
-const alice = generateAgentIdentity('alice');
-// → { agentId, publicKey, privateKey, signingKey, verifyKey }
+// Each agent generates an identity (writes keypair to dataDir)
+const alice = generateAgentIdentity('/path/to/alice/data');
+// → { agentId, publicKey, encPublicKey, ... }
 
-const bob = generateAgentIdentity('bob');
+const bob = generateAgentIdentity('/path/to/bob/data');
 
 // Alice grants Bob read access (expires in 7 days)
-grantAccess(alice.dataDir, {
-  granteeId: 'bob',
-  granteePublicKey: bob.publicKey,
-  permissions: ['read', 'cite'],
-  expiresAt: Date.now() + 7 * 86400000,
-});
+grantAccess('/path/to/alice/data', 'bob', {
+  episodeIds: ['ep_alice_123'],
+  recipientPublicKey: bob.publicKey,
+}, 'read', new Date(Date.now() + 7 * 86400000).toISOString());
 
 // Alice exports episodes for Bob (signed + encrypted)
-const pkg = exportEpisodes(alice.dataDir, {
-  episodeIds: ['ep_alice_123'],
-  recipientId: 'bob',
-  recipientPublicKey: bob.publicKey,
-  identity: alice,
+const aliceMem = { _basePath: '/path/to/alice/data', getRecent: async () => [episode] };
+const pkg = await exportEpisodes(aliceMem, ['ep_alice_123'], {
+  recipientAgentId: 'bob',
+  recipientPublicKey: bob.encPublicKey,
   encrypt: true,  // X25519 ECDH + ChaCha20-Poly1305
 });
-// → .engram-share file
+// → share package object
 
 // Bob imports (verifies signature, decrypts, deduplicates)
-const imported = importShare(bob.dataDir, pkg, { identity: bob });
+const imported = await importShare(bobMem, pkg, { dataDir: '/path/to/bob/data' });
 // → { imported: 1, skipped: 0, episodes: [...] }
 ```
 
