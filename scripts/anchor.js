@@ -162,7 +162,8 @@ export function getEpisodeProof(snapshot, episodeId) {
 // ─── On-chain anchoring (lazy Solana deps) ────────────────────
 
 const AGENTTRACE_PROGRAM_ID = 'DY7oL6kjgLihMXeHypHQHAXxBLxFBVvd4bwkUwb7upyF';
-const IDL_PATH = resolve('/home/node/.openclaw/workspace/hackathon/agenttrace/frontend/src/idl/agenttrace.json');
+const __anchor_dirname = new URL('.', import.meta.url).pathname;
+const IDL_PATH = resolve(__anchor_dirname, '../../frontend/src/idl/agenttrace.json');
 
 async function loadSolanaDeps() {
   const anchor = await import('@coral-xyz/anchor');
@@ -352,10 +353,8 @@ Flags:
 }
 
 // Run CLI if executed directly
-const isMain = process.argv[1] && (
-  process.argv[1].endsWith('anchor.js') ||
-  process.argv[1].endsWith('scripts/anchor.js')
-);
+const _self = process.argv[1] || '';
+const isMain = _self.endsWith('/anchor.js') && !_self.includes('/demo/');
 if (isMain) {
   cli().catch(e => { console.error(e.message); process.exit(1); });
 }
