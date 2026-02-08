@@ -4,6 +4,20 @@
 
 ## Changelog
 
+### v1.3.1 (2026-02-08)
+
+**Token Budget Fix** — Episodes truncated to 300 chars in context building. Token estimation uses chars/3.5 for more accurate LLM token counts. Prevents context injection from blowing past budget limits.
+
+### v1.3.0 (2026-02-08)
+
+**Pre-prompt Injection** — `inject(query, opts)` returns a ready-to-use context block with token budget awareness. Integrates with OpenClaw's compaction and heartbeat flows.
+
+**Session Transcript Digestion** — `digest(file)` reads JSONL session transcripts and extracts key episodes (decisions, errors, tool results) automatically.
+
+**Compaction Hooks** — `checkpoint()` creates a compaction episode summarizing recent activity. `post-compaction` command provides context for fresh sessions after memory compaction.
+
+**Hourly Summaries** — `hourly-summary` command creates periodic roll-up episodes to reduce noise from high-frequency events.
+
 ### v1.2.0 (2026-02-08)
 
 **Configurable Synonyms** — Synonym groups extracted to `config/synonyms.json`. Layered loading: built-in defaults → `ENGRAM_SYNONYMS` env → `<dataDir>/synonyms.json` → explicit `synonymsFile` option → runtime `addSynonymGroup()`. Each layer merges.
