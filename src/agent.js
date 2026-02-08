@@ -55,7 +55,7 @@ export class AgentMemory {
 
     // Storage backend
     this._redisConfig = opts.redis || null;
-    const basePath = opts.basePath || 'memory/engram';
+    const basePath = opts.basePath || opts.dataDir || 'memory/engram';
     this._basePath = basePath;
     this.storage = opts.redis ? null : new FileStorage(basePath);
 
