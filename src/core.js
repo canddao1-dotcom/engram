@@ -20,6 +20,7 @@ export const EPISODE_TYPES = {
   alert: 'alert',
   decision: 'decision',
   lesson: 'lesson',
+  checkpoint: 'checkpoint',
 };
 
 // ─── Tokenizer ───────────────────────────────────────────────────

@@ -4,6 +4,7 @@
  */
 
 export { AgentMemory } from './agent.js';
+export { readTranscript, digestTranscript } from './transcript.js';
 export { QueryEngine } from './query.js';
 export { FileStorage } from './storage/file.js';
 export { RedisStorage } from './storage/redis.js';

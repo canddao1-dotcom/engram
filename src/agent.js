@@ -4,13 +4,30 @@
  * v1.1: Incremental BM25 index, lazy episode loading, synonym expansion.
  */
 
-import { createEpisode, chunk, tokenize, contentHash, EPISODE_TYPES } from './core.js';
+import { createEpisode, chunk, tokenize, contentHash, EPISODE_TYPES, termFrequencies } from './core.js';
 import { QueryEngine } from './query.js';
 import { FileStorage } from './storage/file.js';
 import { parseTemporalQuery } from './temporal.js';
 import { initSynonyms, loadCustomSynonyms } from './synonyms.js';
 import { existsSync } from 'fs';
 import { join } from 'path';
+
+/**
+ * Format a timestamp as a human-readable relative time string.
+ */
+function _relativeTime(ts, now = Date.now()) {
+  const diff = now - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days}d ago`;
+  const weeks = Math.floor(days / 7);
+  return `${weeks}w ago`;
+}
 
 export class AgentMemory {
   /**
@@ -408,6 +425,273 @@ export class AgentMemory {
     });
 
     return episodes[0];
+  }
+
+  // ─── v1.3: Pre-Prompt Injection ──────────────────────────────
+
+  /**
+   * Fast pre-prompt memory injection. Designed for sub-300ms retrieval.
+   * Returns a compact context string optimized for token budget.
+   *
+   * @param {string} query - The user's prompt/query
+   * @param {object} options
+   * @param {number} options.maxTokens - Max tokens for context (default: 1500)
+   * @param {number} options.recentCount - Number of recent episodes to always include (default: 3)
+   * @param {boolean} options.includeRecent - Whether to include recent episodes (default: true)
+   * @param {string[]} options.priorityTags - Tags to boost in results
+   * @param {string[]} options.excludeTags - Tags to exclude (e.g., 'migrated')
+   * @returns {string} Formatted context string ready for LLM injection
+   */
+  async injectContext(query, options = {}) {
+    await this.init();
+    const {
+      maxTokens = 1500,
+      recentCount = 3,
+      includeRecent = true,
+      priorityTags = [],
+      excludeTags = [],
+    } = options;
+
+    // 1. BM25 recall (already in-memory, fast)
+    const searchResults = this.engine.search(query, { limit: 15 });
+
+    // 2. Get recent episodes from engine docs (no file I/O)
+    let recentIds = [];
+    if (includeRecent && recentCount > 0) {
+      const allDocs = [...this.engine.docs.entries()]
+        .sort((a, b) => b[1].createdAt - a[1].createdAt)
+        .slice(0, recentCount);
+      recentIds = allDocs.map(([id]) => id);
+    }
+
+    // 3. Merge & deduplicate
+    const seen = new Set();
+    const merged = [];
+
+    // Add search results first
+    for (const r of searchResults) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      const doc = this.engine.docs.get(r.id);
+      if (!doc) continue;
+      if (excludeTags.length && doc.tags.some(t => excludeTags.includes(t))) continue;
+      const priorityBoost = priorityTags.length && doc.tags.some(t => priorityTags.includes(t)) ? 1.5 : 1.0;
+      merged.push({ id: r.id, score: r.score * priorityBoost, recency: r.recency, doc, isRecent: false });
+    }
+
+    // Add recent episodes
+    for (const id of recentIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const doc = this.engine.docs.get(id);
+      if (!doc) continue;
+      if (excludeTags.length && doc.tags.some(t => excludeTags.includes(t))) continue;
+      merged.push({ id, score: 0, recency: 1.0, doc, isRecent: true });
+    }
+
+    if (merged.length === 0) return '';
+
+    // 4. Load full episodes (only those we'll use)
+    const now = Date.now();
+    const relevantItems = [];
+    const recentItems = [];
+
+    for (const item of merged) {
+      const ep = await this.storage.getEpisode(item.id);
+      if (!ep) continue;
+      const formatted = `[${ep.type}] (${_relativeTime(ep.createdAt, now)}) ${ep.text}`;
+      if (item.isRecent) {
+        recentItems.push(formatted);
+      } else {
+        relevantItems.push(formatted);
+      }
+    }
+
+    // 5. Build output with section headers
+    let output = '';
+    if (relevantItems.length > 0) {
+      output += '## Relevant Memories\n';
+      output += relevantItems.join('\n') + '\n';
+    }
+    if (recentItems.length > 0) {
+      if (output) output += '\n';
+      output += '## Recent Context\n';
+      output += recentItems.join('\n') + '\n';
+    }
+
+    // 6. Truncate to token budget
+    const tokens = tokenize(output);
+    if (tokens.length > maxTokens) {
+      // Rough truncation: estimate ~4 chars per token
+      const charBudget = maxTokens * 4;
+      output = output.slice(0, charBudget);
+      // Trim to last complete line
+      const lastNewline = output.lastIndexOf('\n');
+      if (lastNewline > 0) output = output.slice(0, lastNewline + 1);
+    }
+
+    return output.trim();
+  }
+
+  // ─── v1.3: Compaction Hooks ────────────────────────────────────
+
+  /**
+   * Called before context compaction. Summarizes current session state
+   * and stores it as an Engram episode for post-compaction retrieval.
+   *
+   * @param {object} options
+   * @param {string} options.sessionSummary - Summary of current session
+   * @param {string[]} options.keyDecisions - List of key decisions made
+   * @param {string[]} options.pendingTasks - Tasks still in progress
+   * @param {object} options.metadata - Additional metadata
+   * @returns {string} Episode ID of the compaction checkpoint
+   */
+  async compactionCheckpoint(options = {}) {
+    const {
+      sessionSummary = '',
+      keyDecisions = [],
+      pendingTasks = [],
+      metadata = {},
+    } = options;
+
+    const parts = [];
+    if (sessionSummary) parts.push(`Summary: ${sessionSummary}`);
+    if (keyDecisions.length) parts.push(`Key decisions: ${keyDecisions.join('; ')}`);
+    if (pendingTasks.length) parts.push(`Pending tasks: ${pendingTasks.join('; ')}`);
+
+    const text = parts.join('\n') || 'Compaction checkpoint (no details provided)';
+    const eps = await this.remember(text, {
+      type: 'checkpoint',
+      tags: ['checkpoint', 'compaction'],
+      importance: 0.95,
+      metadata: { ...metadata, isCompactionCheckpoint: true, timestamp: Date.now() },
+    });
+
+    return eps[0].id;
+  }
+
+  /**
+   * Called after context compaction. Retrieves the most relevant context
+   * to inject into the fresh post-compaction session.
+   *
+   * @param {object} options
+   * @param {number} options.maxTokens - Token budget (default: 3000)
+   * @param {number} options.hoursBack - How far back to look (default: 24)
+   * @param {boolean} options.includeCheckpoints - Include compaction checkpoints (default: true)
+   * @returns {string} Rich context string for post-compaction injection
+   */
+  async postCompactionContext(options = {}) {
+    await this.init();
+    const {
+      maxTokens = 3000,
+      hoursBack = 24,
+      includeCheckpoints = true,
+    } = options;
+
+    const now = Date.now();
+    const cutoff = now - hoursBack * 3600000;
+
+    // Get all episodes from engine docs within time range
+    const candidates = [];
+    for (const [id, doc] of this.engine.docs) {
+      if (doc.createdAt < cutoff) continue;
+      candidates.push({ id, doc });
+    }
+
+    // Priority ordering
+    const TYPE_PRIORITY = {
+      checkpoint: 0,
+      decision: 1,
+      lesson: 2,
+      event: 3,
+      fact: 4,
+      trade: 5,
+      position: 6,
+      document: 7,
+      summary: 8,
+      conversation: 9,
+      custom: 10,
+    };
+
+    candidates.sort((a, b) => {
+      const pa = TYPE_PRIORITY[a.doc.type] ?? 10;
+      const pb = TYPE_PRIORITY[b.doc.type] ?? 10;
+      if (pa !== pb) return pa - pb;
+      return b.doc.createdAt - a.doc.createdAt; // newer first within same type
+    });
+
+    // Filter out checkpoints if not wanted
+    const filtered = includeCheckpoints
+      ? candidates
+      : candidates.filter(c => c.doc.type !== 'checkpoint');
+
+    // Load and format
+    let output = '## Post-Compaction Context\n';
+    let tokenCount = 0;
+
+    for (const { id } of filtered) {
+      const ep = await this.storage.getEpisode(id);
+      if (!ep) continue;
+      const line = `[${ep.type}] (${_relativeTime(ep.createdAt, now)}) ${ep.text}\n`;
+      const lineTokens = tokenize(line).length;
+      if (tokenCount + lineTokens > maxTokens) break;
+      output += line;
+      tokenCount += lineTokens;
+    }
+
+    return output.trim();
+  }
+
+  // ─── v1.3: Hourly Summary ─────────────────────────────────────
+
+  /**
+   * Summarize episodes from the last N hours into a single summary episode.
+   * Useful for hourly cron jobs that maintain running summaries.
+   *
+   * @param {number} hours - Hours to look back (default: 1)
+   * @param {object} options
+   * @param {boolean} options.supersede - Whether to supersede the source episodes (default: false)
+   * @returns {object} The summary episode
+   */
+  async hourlySummary(hours = 1, options = {}) {
+    await this.init();
+    const { supersede = false } = options;
+    const now = Date.now();
+    const cutoff = now - hours * 3600000;
+
+    // Get episodes within time window
+    const all = await this.storage.getAllEpisodes();
+    const recent = all
+      .filter(ep => ep.createdAt >= cutoff && ep.type !== 'summary')
+      .sort((a, b) => a.createdAt - b.createdAt);
+
+    if (recent.length === 0) {
+      return this.remember(`Hourly summary (${hours}h): No new episodes.`, {
+        type: 'summary',
+        tags: ['summary', 'hourly'],
+        importance: 0.3,
+      }).then(eps => eps[0]);
+    }
+
+    // Build summary text
+    const lines = recent.map(ep => {
+      const time = new Date(ep.createdAt).toISOString().slice(11, 16);
+      return `[${time}] (${ep.type}) ${ep.text.slice(0, 150)}`;
+    });
+    const summaryText = `Hourly summary (last ${hours}h, ${recent.length} episodes):\n${lines.join('\n')}`;
+
+    const ids = recent.map(ep => ep.id);
+    const supersedes = supersede ? ids : undefined;
+
+    const eps = await this.remember(summaryText, {
+      type: 'summary',
+      tags: ['summary', 'hourly'],
+      importance: 0.7,
+      metadata: { summarizedIds: ids, hours },
+      supersedes,
+    });
+
+    return eps[0];
   }
 
   /**

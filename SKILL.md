@@ -4,6 +4,20 @@
 
 ## Changelog
 
+### v1.3.0 (2026-02-08)
+
+**Pre-Prompt Memory Injection** — New `injectContext(query, opts)` method for fast (<300ms) context injection before every LLM prompt. Returns formatted context with `## Relevant Memories` and `## Recent Context` sections, respecting a configurable token budget. Supports priority/exclude tag filtering.
+
+**Session Transcript Reader** — New `src/transcript.js` with `readTranscript()` to parse OpenClaw `.jsonl` session transcripts by role, and `digestTranscript()` to auto-extract decisions, trades, lessons, and events into Engram episodes.
+
+**Compaction Hooks** — `compactionCheckpoint()` stores session state before context compaction. `postCompactionContext()` retrieves prioritized context (checkpoints > decisions > lessons > events) for post-compaction injection. Ensures memory continuity across compaction boundaries.
+
+**Hourly Summary** — `hourlySummary(hours)` condenses recent episodes into a single summary episode, useful for cron-based running summaries. Optional supersession of source episodes.
+
+**New CLI commands:** `inject`, `digest`, `checkpoint`, `post-compaction`, `hourly-summary`.
+
+*Inspired by the context transfer approach for maintaining agent memory across session boundaries.*
+
 ### v1.2.0 (2026-02-08)
 
 **Configurable Synonyms** — Synonym groups are now loaded from `config/synonyms.json` instead of being hardcoded. Supports layered loading: built-in defaults → `ENGRAM_SYNONYMS` env var → `<dataDir>/synonyms.json` → explicit `synonymsFile` option → runtime `addSynonymGroup()`. Each layer merges, never replaces.
@@ -131,6 +145,10 @@ Superseded episodes get their score multiplied by 0.3 by default, so current inf
 | `rememberSuperseding(text, oldIds, opts)` | `Episode[]` | Store + mark old as superseded |
 | `getSupersessionChain(id)` | `Episode[]` | Get full supersession chain |
 | `buildContext(query, opts)` | `string` | LLM-ready context string |
+| `injectContext(query, opts)` | `string` | Fast pre-prompt injection (v1.3) |
+| `compactionCheckpoint(opts)` | `string` | Store compaction checkpoint (v1.3) |
+| `postCompactionContext(opts)` | `string` | Post-compaction context (v1.3) |
+| `hourlySummary(hours, opts)` | `Episode` | Hourly summary episode (v1.3) |
 | `getRecent(limit)` | `Episode[]` | Latest memories |
 | `forget(id)` | `boolean` | Delete a memory |
 | `getStats()` | `object` | Memory statistics |

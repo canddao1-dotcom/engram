@@ -5,6 +5,7 @@
  */
 
 import { AgentMemory } from '../src/agent.js';
+import { readTranscript, digestTranscript } from '../src/transcript.js';
 import { resolve } from 'path';
 
 // Parse args
@@ -147,6 +148,58 @@ async function main() {
       break;
     }
 
+    case 'inject': {
+      const query = positional[1];
+      if (!query) { console.error('Usage: engram inject "query" [--max-tokens 1500]'); process.exit(1); }
+      const maxTokens = parseInt(flags['max-tokens'] || '1500');
+      const priorityTags = flags['priority-tags'] ? flags['priority-tags'].split(',') : [];
+      const excludeTags = flags['exclude-tags'] ? flags['exclude-tags'].split(',') : [];
+      const start = Date.now();
+      const context = await mem.injectContext(query, { maxTokens, priorityTags, excludeTags });
+      const elapsed = Date.now() - start;
+      if (context) {
+        console.log(context);
+        console.log(`\n--- ${elapsed}ms ---`);
+      } else {
+        console.log('(no relevant context found)');
+      }
+      break;
+    }
+
+    case 'digest': {
+      const path = positional[1];
+      if (!path) { console.error('Usage: engram digest <transcript.jsonl>'); process.exit(1); }
+      const count = await digestTranscript(resolve(path), mem);
+      console.log(`✓ Digested ${count} episodes from transcript`);
+      break;
+    }
+
+    case 'checkpoint': {
+      const summary = flags.summary || '';
+      const decisions = flags.decisions ? flags.decisions.split(',') : [];
+      const pending = flags.pending ? flags.pending.split(',') : [];
+      const id = await mem.compactionCheckpoint({ sessionSummary: summary, keyDecisions: decisions, pendingTasks: pending });
+      console.log(`✓ Checkpoint created: ${id}`);
+      break;
+    }
+
+    case 'post-compaction': {
+      const maxTokens = parseInt(flags['max-tokens'] || '3000');
+      const hoursBack = parseInt(flags.hours || '24');
+      const context = await mem.postCompactionContext({ maxTokens, hoursBack });
+      console.log(context || '(no context available)');
+      break;
+    }
+
+    case 'hourly-summary': {
+      const hours = parseFloat(flags.hours || '1');
+      const supersede = flags.supersede === 'true';
+      const ep = await mem.hourlySummary(hours, { supersede });
+      console.log(`✓ Summary created: ${ep.id}`);
+      console.log(ep.text.slice(0, 300));
+      break;
+    }
+
     case 'migrate': {
       // Delegate to migrate script
       const { migrate } = await import('./migrate.js');
@@ -160,27 +213,39 @@ async function main() {
 Usage: node engram.js <command> [args] [--flags]
 
 Commands:
-  remember <text>     Store a memory
-  recall <query>      Search memories (BM25 + recency)
-  recent              Get recent memories
-  temporal <query>    Time-based query ("what happened yesterday")
-  context <query>     Build LLM-ready context string
-  stats               Memory statistics
-  prune               Cleanup old/low-importance memories
-  forget <id>         Delete a specific memory
-  chain <id>          Show supersession chain for an episode
-  migrate             Import existing memory/*.md files
+  remember <text>          Store a memory
+  recall <query>           Search memories (BM25 + recency)
+  recent                   Get recent memories
+  temporal <query>         Time-based query ("what happened yesterday")
+  context <query>          Build LLM-ready context string
+  inject <query>           Pre-prompt memory injection (v1.3)
+  digest <file.jsonl>      Digest a session transcript (v1.3)
+  checkpoint               Create compaction checkpoint (v1.3)
+  post-compaction          Get post-compaction context (v1.3)
+  hourly-summary           Create hourly summary episode (v1.3)
+  stats                    Memory statistics
+  prune                    Cleanup old/low-importance memories
+  forget <id>              Delete a specific memory
+  chain <id>               Show supersession chain for an episode
+  migrate                  Import existing memory/*.md files
 
 Flags:
-  --type <type>       Episode type (fact, trade, lesson, etc.)
+  --type <type>       Episode type (fact, trade, lesson, checkpoint, etc.)
   --tags <a,b>        Comma-separated tags
   --importance <0-1>  Importance score
   --limit <n>         Result limit
-  --max-tokens <n>    Max tokens for context
+  --max-tokens <n>    Max tokens for context/injection
   --keep <n>          Keep N best memories (prune)
   --supersedes <ids>  Comma-separated episode IDs to supersede
   --path <dir>        Storage directory
   --agent <id>        Agent ID
+  --hours <n>         Hours to look back (post-compaction, hourly-summary)
+  --summary <text>    Session summary (checkpoint)
+  --decisions <a,b>   Key decisions (checkpoint)
+  --pending <a,b>     Pending tasks (checkpoint)
+  --supersede         Supersede source episodes (hourly-summary)
+  --priority-tags <a> Tags to boost (inject)
+  --exclude-tags <a>  Tags to exclude (inject)
 `);
   }
 }

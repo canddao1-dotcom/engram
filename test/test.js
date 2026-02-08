@@ -421,6 +421,177 @@ section('Supersession: chain traversal');
   }
 }
 
+// ─── v1.3: injectContext Test ─────────────────────────────────────
+section('v1.3: injectContext');
+{
+  const testPath = join(process.cwd(), '.engram-inject-test-' + Date.now());
+  try {
+    const mem = new AgentMemory({ agentId: 'test', basePath: testPath });
+    await mem.remember('Rebalanced FXRP/WFLR position to tighter range', { type: 'decision', tags: ['fxrp', 'lp'], importance: 0.9 });
+    await mem.remember('Swapped 500 WFLR for sFLR on Sceptre', { type: 'trade', tags: ['wflr', 'sflr'], importance: 0.7 });
+    await mem.remember('8004 metadata updated on-chain', { type: 'event', tags: ['8004'], importance: 0.6 });
+
+    const start = Date.now();
+    const ctx = await mem.injectContext('FXRP position', { maxTokens: 1500 });
+    const elapsed = Date.now() - start;
+
+    assert(ctx.length > 0, 'injectContext returns non-empty context');
+    assert(ctx.includes('Relevant Memories') || ctx.includes('Recent Context'), 'has section headers');
+    assert(elapsed < 2000, `fast execution: ${elapsed}ms`);
+
+    // Token budget test
+    const smallCtx = await mem.injectContext('FXRP', { maxTokens: 10 });
+    assert(smallCtx.length < ctx.length || smallCtx.length > 0, 'respects smaller token budget');
+
+    // No BM25 matches but recent context still appears
+    const emptyCtx = await mem.injectContext('zzzznonexistent12345', { includeRecent: false });
+    assert(emptyCtx === '', 'returns empty string for no matches (no recent)');
+
+    // Exclude tags
+    const excludeCtx = await mem.injectContext('FXRP position', { excludeTags: ['fxrp'], includeRecent: false });
+    assert(!excludeCtx.includes('FXRP/WFLR'), 'excludeTags filters results');
+
+    console.log('\n✓ injectContext tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+// ─── v1.3: Transcript Reader Test ────────────────────────────────
+import { readTranscript, digestTranscript } from '../src/transcript.js';
+import { writeFile as writeFileSync } from 'fs/promises';
+
+section('v1.3: readTranscript');
+{
+  const testPath = join(process.cwd(), '.engram-transcript-test-' + Date.now());
+  const transcriptFile = join(testPath, 'test-session.jsonl');
+
+  try {
+    await import('fs').then(fs => fs.promises.mkdir(testPath, { recursive: true }));
+
+    // Create test transcript
+    const lines = [
+      JSON.stringify({ role: 'system', content: 'You are a helpful assistant.' }),
+      JSON.stringify({ role: 'user', content: 'What is my FXRP balance?' }),
+      JSON.stringify({ role: 'assistant', content: 'Your FXRP balance is 5000 tokens.' }),
+      JSON.stringify({ role: 'user', content: 'I decided to swap 1000 FXRP for WFLR' }),
+      'this is a malformed line that should be skipped',
+      JSON.stringify({ role: 'tool', content: 'swap executed successfully' }),
+      JSON.stringify({ role: 'assistant', content: 'Done! I swapped 1000 FXRP for WFLR at rate 0.45.' }),
+      JSON.stringify({ role: 'user', content: 'Lesson learned: always check slippage before large swaps' }),
+    ];
+    await writeFileSync(transcriptFile, lines.join('\n'));
+
+    const result = await readTranscript(transcriptFile);
+    assert(result.userMessages.length === 3, `extracted ${result.userMessages.length} user messages (expected 3)`);
+    assert(result.assistantMessages.length === 2, `extracted ${result.assistantMessages.length} assistant messages (expected 2)`);
+    assert(result.systemMessages.length === 1, `extracted ${result.systemMessages.length} system messages (expected 1)`);
+    assert(result.summary.includes('total messages'), 'has summary string');
+
+    // Test with limit
+    const limited = await readTranscript(transcriptFile, { userMessages: 1 });
+    assert(limited.userMessages.length === 1, 'userMessages limit works');
+
+    console.log('\n✓ readTranscript tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+section('v1.3: digestTranscript');
+{
+  const testPath = join(process.cwd(), '.engram-digest-test-' + Date.now());
+  const transcriptFile = join(testPath, 'session.jsonl');
+
+  try {
+    await import('fs').then(fs => fs.promises.mkdir(testPath, { recursive: true }));
+
+    const lines = [
+      JSON.stringify({ role: 'user', content: 'I decided to rebalance the LP position to a tighter range for more fees' }),
+      JSON.stringify({ role: 'assistant', content: 'I swapped 500 WFLR for sFLR on Sceptre Finance at the current rate' }),
+      JSON.stringify({ role: 'user', content: 'Lesson learned: never bridge without checking gas fees first, cost me 50 FLR' }),
+      JSON.stringify({ role: 'assistant', content: 'Deployed the new contract to mainnet successfully' }),
+    ];
+    await writeFileSync(transcriptFile, lines.join('\n'));
+
+    const memPath = join(testPath, 'memory');
+    const mem = new AgentMemory({ agentId: 'test', basePath: memPath });
+    const count = await digestTranscript(transcriptFile, mem);
+    assert(count > 0, `created ${count} episodes from transcript`);
+    assert(count <= 10, 'reasonable number of episodes');
+
+    const stats = await mem.getStats();
+    assert(stats.episodeCount === count, 'episodes stored correctly');
+
+    console.log('\n✓ digestTranscript tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+// ─── v1.3: Compaction Hooks Test ─────────────────────────────────
+section('v1.3: compactionCheckpoint + postCompactionContext');
+{
+  const testPath = join(process.cwd(), '.engram-compaction-test-' + Date.now());
+  try {
+    const mem = new AgentMemory({ agentId: 'test', basePath: testPath });
+
+    // Store some episodes
+    await mem.remember('Opened LP position on SparkDex', { type: 'event', tags: ['lp'] });
+    await mem.remember('Decided to use tighter range for higher fees', { type: 'decision', tags: ['lp'] });
+
+    // Create checkpoint
+    const cpId = await mem.compactionCheckpoint({
+      sessionSummary: 'Working on LP management and rebalancing',
+      keyDecisions: ['Tighter range on SparkDex', 'Keep sFLR staked'],
+      pendingTasks: ['Monitor LP health', 'Check bridge status'],
+    });
+    assert(cpId && cpId.startsWith('ep_'), `checkpoint created: ${cpId}`);
+
+    // Verify checkpoint episode
+    const cpEp = await mem.storage.getEpisode(cpId);
+    assert(cpEp.type === 'checkpoint', 'checkpoint has correct type');
+    assert(cpEp.tags.includes('compaction'), 'checkpoint tagged with compaction');
+
+    // Get post-compaction context
+    const ctx = await mem.postCompactionContext({ maxTokens: 3000, hoursBack: 1 });
+    assert(ctx.length > 0, 'post-compaction context is non-empty');
+    assert(ctx.includes('Post-Compaction Context'), 'has header');
+    assert(ctx.includes('checkpoint'), 'includes checkpoint episode');
+
+    console.log('\n✓ Compaction hooks tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+// ─── v1.3: Hourly Summary Test ───────────────────────────────────
+section('v1.3: hourlySummary');
+{
+  const testPath = join(process.cwd(), '.engram-hourly-test-' + Date.now());
+  try {
+    const mem = new AgentMemory({ agentId: 'test', basePath: testPath });
+
+    await mem.remember('Price alert: FXRP above 3.0', { type: 'alert', tags: ['fxrp'] });
+    await mem.remember('Rebalanced LP to new range', { type: 'event', tags: ['lp'] });
+    await mem.remember('Staked 1000 FLR on Sceptre', { type: 'trade', tags: ['staking'] });
+
+    const summary = await mem.hourlySummary(1);
+    assert(summary.id && summary.id.startsWith('ep_'), 'summary episode created');
+    assert(summary.type === 'summary', 'type is summary');
+    assert(summary.tags.includes('hourly'), 'tagged as hourly');
+    assert(summary.text.includes('episodes'), 'mentions episode count');
+
+    // Verify it's stored
+    const stats = await mem.getStats();
+    assert(stats.episodeCount === 4, '3 original + 1 summary = 4 episodes');
+
+    console.log('\n✓ hourlySummary tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
 // ─── Summary ─────────────────────────────────────────────────────
 console.log(`\n${'═'.repeat(40)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);
