@@ -1,0 +1,16 @@
+{
+  "name": "@openclaw/engram",
+  "version": "1.0.0",
+  "description": "Engram — Persistent Memory for AI Agents. Zero-dependency memory system for OpenClaw agents.",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test/test.js",
+    "remember": "node scripts/engram.js remember",
+    "recall": "node scripts/engram.js recall",
+    "stats": "node scripts/engram.js stats"
+  },
+  "keywords": ["openclaw", "memory", "agent", "bm25", "engram"],
+  "license": "MIT",
+  "engines": { "node": ">=18.0.0" }
+}
