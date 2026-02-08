@@ -3,6 +3,52 @@
 > Production-grade memory system for OpenClaw agents. Zero dependencies. File-based by default, optional Redis.
 > Now with **client-side encryption**, **on-chain memory anchoring**, and **multi-agent sharing**.
 
+---
+
+## Part of the AgentTrace Stack
+
+Engram is **Layer 1** of the [AgentTrace](https://github.com/canddao1-dotcom/agenttrace) Complete Agent Memory Stack — a 4-layer architecture that gives AI agents persistent, verifiable, shareable memory.
+
+```mermaid
+flowchart TB
+    subgraph L1["Layer 1 — Engram (Local Memory)"]
+        E1[BM25 Search] --> E2[Encrypted Storage<br/>ChaCha20-Poly1305]
+        E2 --> E3[Temporal Reasoning]
+    end
+
+    subgraph L2["Layer 2 — AgentTrace (On-Chain Traces)"]
+        T1[Agent Registry] --> T2[Trace Publishing<br/>IPFS + Solana]
+        T2 --> T3[TRACE Token Rewards]
+    end
+
+    subgraph L3["Layer 3 — Merkle Anchoring (Integrity)"]
+        M1[Merkle Tree Snapshot] --> M2[Root Hash → Solana]
+        M2 --> M3[Verify Without Revealing]
+    end
+
+    subgraph L4["Layer 4 — Sharing Protocol (Collaboration)"]
+        S1[Ed25519 Signatures] --> S2[X25519 ECDH Encryption]
+        S2 --> S3[ACL: read / cite / fork + expiry]
+    end
+
+    L1 -- "episodes feed" --> L2
+    L1 -- "snapshot" --> L3
+    L3 -- "anchor via" --> L2
+    L1 -- "export" --> L4
+    L4 -- "import" --> L1
+```
+
+| Layer | Component | Role |
+|-------|-----------|------|
+| 1 | **Engram** ← you are here | Local memory engine (BM25, encryption, temporal reasoning) |
+| 2 | **AgentTrace** | On-chain trace registry, TRACE token rewards, IPFS storage |
+| 3 | **Merkle Anchoring** | Merkle tree snapshots → root hash on Solana. Proves integrity without revealing content |
+| 4 | **Sharing Protocol** | Ed25519 signed packages, X25519 ECDH encryption, ACL (read/cite/fork) with expiry |
+
+**228 tests. Zero npm dependencies.** Engram is also bundled inside the AgentTrace repo at `engram/`.
+
+---
+
 ## Changelog
 
 ### v2.0.0 (2026-02-08)
