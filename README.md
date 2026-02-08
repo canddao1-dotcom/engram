@@ -43,6 +43,124 @@
 
 **Lazy Episode Loading** — Episodes are loaded on-demand from disk only when they appear in search results, rather than all being held in memory.
 
+## v2.0 Features
+
+### 🔐 Encryption
+
+Encrypt memories at rest with ChaCha20-Poly1305. Zero plaintext on disk.
+
+```javascript
+import { generateKey, deriveKey, encrypt, decrypt, EncryptedStorage } from './scripts/encryption.js';
+
+// Generate a random key
+const key = generateKey(); // 256-bit hex key
+
+// Or derive from password
+const { key, salt } = deriveKey('my-secret-password');
+
+// Low-level encrypt/decrypt
+const sealed = encrypt('sensitive memory', key);
+// → { nonce, ciphertext, tag } (all hex)
+const plain = decrypt(sealed, key);
+
+// Full encrypted storage (drop-in replacement for FileStorage)
+const store = new EncryptedStorage('/path/to/data', { key });
+// or: new EncryptedStorage(dir, { password: 'secret' })
+// or: new EncryptedStorage(dir, { keyFile: '/path/to/keyfile' })
+// or: set ENGRAM_KEY env var
+
+await store.save(episode);        // Encrypted on disk
+const ep = await store.load(id);  // Decrypted transparently
+```
+
+**Key features:**
+- PBKDF2 key derivation (100k iterations, SHA-512)
+- Metadata (timestamps, types, tags) stays unencrypted for filtering
+- BM25 index rebuilt from decrypted episodes in memory
+- Supports: direct key, password, env var (`ENGRAM_KEY`), key file
+
+### ⚓ On-Chain Anchoring
+
+Anchor Merkle root of your memory to Solana via AgentTrace. Prove memory integrity without revealing content.
+
+```javascript
+import { createSnapshot, verifySnapshot, verifyEpisode, anchorOnChain } from './scripts/anchor.js';
+
+// Create a Merkle snapshot of all episodes
+const snapshot = await createSnapshot('/path/to/engram/data');
+// → { merkleRoot, episodeCount, leaves, timestamp, snapshotId }
+
+// Verify snapshot integrity
+const valid = await verifySnapshot('/path/to/engram/data', snapshot.snapshotId);
+
+// Prove a specific episode is in the snapshot
+const proof = await verifyEpisode('/path/to/engram/data', snapshot.snapshotId, episodeId);
+// → { valid: true, proof: [...], root, leaf }
+
+// Anchor to Solana (requires AgentTrace program)
+const tx = await anchorOnChain('/path/to/engram/data', snapshot.snapshotId, {
+  keypairPath: '~/.config/solana/id.json',
+  rpcUrl: 'https://api.mainnet-beta.solana.com',
+});
+```
+
+**CLI:**
+```bash
+node scripts/anchor.js snapshot --path memory/engram
+node scripts/anchor.js verify --path memory/engram --snapshot snap_abc123
+node scripts/anchor.js prove --path memory/engram --snapshot snap_abc123 --episode ep_default_123
+node scripts/anchor.js anchor --path memory/engram --snapshot snap_abc123 --keypair ~/.config/solana/id.json
+```
+
+### 🤝 Multi-Agent Sharing
+
+Share memories between agents with Ed25519 signatures and optional X25519 encryption.
+
+```javascript
+import {
+  generateAgentIdentity, exportEpisodes, importShare,
+  grantAccess, revokeAccess
+} from './scripts/sharing.js';
+
+// Each agent generates an identity
+const alice = generateAgentIdentity('alice');
+// → { agentId, publicKey, privateKey, signingKey, verifyKey }
+
+const bob = generateAgentIdentity('bob');
+
+// Alice grants Bob read access (expires in 7 days)
+grantAccess(alice.dataDir, {
+  granteeId: 'bob',
+  granteePublicKey: bob.publicKey,
+  permissions: ['read', 'cite'],
+  expiresAt: Date.now() + 7 * 86400000,
+});
+
+// Alice exports episodes for Bob (signed + encrypted)
+const pkg = exportEpisodes(alice.dataDir, {
+  episodeIds: ['ep_alice_123'],
+  recipientId: 'bob',
+  recipientPublicKey: bob.publicKey,
+  identity: alice,
+  encrypt: true,  // X25519 ECDH + ChaCha20-Poly1305
+});
+// → .engram-share file
+
+// Bob imports (verifies signature, decrypts, deduplicates)
+const imported = importShare(bob.dataDir, pkg, { identity: bob });
+// → { imported: 1, skipped: 0, episodes: [...] }
+```
+
+**Key features:**
+- Ed25519 signatures verify authorship
+- X25519 ECDH with ephemeral keys for forward secrecy
+- Permissions: `read`, `cite`, `fork`
+- Expiry enforcement on access grants
+- Imported episodes tagged `shared` with 0.5× importance
+- Content-hash deduplication prevents duplicates
+
+---
+
 ## Why Engram Exists
 
 AI agents wake up fresh every session. Engram gives them persistent, searchable, structured memory that survives restarts — stored as plain JSON files, searchable via BM25, with recency boosting and temporal reasoning.
