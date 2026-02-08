@@ -177,9 +177,10 @@ export function createEpisode(text, opts = {}) {
     chunkIndex = 0,
     totalChunks = 1,
     sourceId = null,
+    supersedes = null,
   } = opts;
 
-  return {
+  const episode = {
     id: generateEpisodeId(agentId),
     text,
     type,
@@ -195,6 +196,12 @@ export function createEpisode(text, opts = {}) {
     accessCount: 0,
     tokens: tokenize(text),
   };
+
+  if (supersedes && Array.isArray(supersedes) && supersedes.length > 0) {
+    episode.supersedes = supersedes;
+  }
+
+  return episode;
 }
 
 /**

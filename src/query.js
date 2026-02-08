@@ -52,7 +52,7 @@ export class QueryEngine {
     }
 
     // Store only index metadata — no tokens array (lazy loading)
-    this.docs.set(id, { dl, tf, createdAt, importance: importance ?? 0.5, lastAccessedAt: lastAccessedAt ?? createdAt, tags: tags || [], type });
+    this.docs.set(id, { dl, tf, createdAt, importance: importance ?? 0.5, lastAccessedAt: lastAccessedAt ?? createdAt, tags: tags || [], type, supersededBy: episode.supersededBy || null });
     this.totalDocs++;
     this.totalLength += dl;
 
@@ -166,10 +166,11 @@ export class QueryEngine {
    * @param {number} opts.before - timestamp, only episodes before this
    * @param {number} opts.minImportance - minimum current importance score
    * @param {boolean} opts.useSynonyms - enable synonym expansion (default true)
+   * @param {boolean} opts.includeSuperseded - include superseded episodes at full score (default false)
    * @returns {{ id: string, score: number, bm25: number, recency: number }[]}
    */
   search(query, opts = {}) {
-    const { limit = 10, tags, type, after, before, minImportance, useSynonyms = true } = opts;
+    const { limit = 10, tags, type, after, before, minImportance, useSynonyms = true, includeSuperseded = false } = opts;
     const queryTokens = tokenize(query);
     if (!queryTokens.length) return [];
 
@@ -231,12 +232,74 @@ export class QueryEngine {
       const score = (1 - this.recencyWeight) * totalBm25 + this.recencyWeight * recency;
 
       // Boost by importance
-      const finalScore = score * (0.5 + currentImportance);
+      let finalScore = score * (0.5 + currentImportance);
+
+      // Penalize superseded episodes (unless includeSuperseded is true)
+      if (!includeSuperseded && doc.supersededBy && doc.supersededBy.length > 0) {
+        finalScore *= 0.3;
+      }
 
       results.push({ id, score: finalScore, bm25: totalBm25, recency });
     }
 
     results.sort((a, b) => b.score - a.score);
     return results.slice(0, limit);
+  }
+
+  /**
+   * Get the supersession chain for an episode.
+   * Returns array from oldest to newest: [original, ..., current]
+   * Requires a storage backend to load full episode data.
+   * @param {string} episodeId
+   * @param {object} storage - FileStorage instance
+   * @returns {object[]} chain of episodes
+   */
+  static async getSupersessionChain(episodeId, storage) {
+    const visited = new Set();
+    const chain = [];
+
+    // Walk backwards to find the root (oldest)
+    let currentId = episodeId;
+    const backtrack = [currentId];
+    while (currentId) {
+      if (visited.has(currentId)) break;
+      visited.add(currentId);
+      const ep = await storage.getEpisode(currentId);
+      if (!ep) break;
+      // Check if this episode supersedes others — walk to the oldest
+      if (ep.supersedes && ep.supersedes.length > 0) {
+        currentId = ep.supersedes[0]; // follow first supersedes link
+        backtrack.unshift(currentId);
+      } else {
+        break;
+      }
+    }
+
+    // Now walk forward from root collecting the chain
+    visited.clear();
+    for (const id of backtrack) {
+      if (visited.has(id)) continue;
+      visited.add(id);
+      const ep = await storage.getEpisode(id);
+      if (ep) chain.push(ep);
+    }
+
+    // Continue forward via supersededBy links from the original episodeId
+    let ep = await storage.getEpisode(episodeId);
+    if (ep && ep.supersededBy) {
+      const queue = [...ep.supersededBy];
+      while (queue.length > 0) {
+        const nextId = queue.shift();
+        if (visited.has(nextId)) continue;
+        visited.add(nextId);
+        const nextEp = await storage.getEpisode(nextId);
+        if (nextEp) {
+          chain.push(nextEp);
+          if (nextEp.supersededBy) queue.push(...nextEp.supersededBy);
+        }
+      }
+    }
+
+    return chain;
   }
 }

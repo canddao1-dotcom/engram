@@ -4,6 +4,12 @@
 
 ## Changelog
 
+### v1.2.0 (2026-02-08)
+
+**Configurable Synonyms** — Synonym groups extracted to `config/synonyms.json`. Layered loading: built-in defaults → `ENGRAM_SYNONYMS` env → `<dataDir>/synonyms.json` → explicit `synonymsFile` option → runtime `addSynonymGroup()`. Each layer merges.
+
+**Supersession Chains** — Episodes can supersede others via `supersedes` field for conflict resolution. Superseded episodes rank 70% lower. `getSupersessionChain(id)` traces the full history. CLI: `--supersedes` flag and `chain` command.
+
 ### v1.1.0 (2026-02-08)
 
 **Incremental BM25 Index** — The BM25 index is now persisted to `memory/engram/index/bm25-index.json` and updated incrementally on startup instead of rebuilding from scratch. Falls back to full rebuild if the index is missing or corrupt.
@@ -76,6 +82,35 @@ node scripts/engram.js forget ep_default_1707000000_abc123
 node scripts/engram.js migrate
 ```
 
+## Configurable Synonyms
+
+Default synonym groups live in `config/synonyms.json`. Loading order (each layer merges):
+
+1. **Built-in defaults** — `config/synonyms.json`
+2. **Environment** — `ENGRAM_SYNONYMS=/path/to/custom.json`
+3. **Agent data dir** — `<basePath>/synonyms.json` (auto-loaded)
+4. **Constructor** — `new AgentMemory({ synonymsFile: '/path/to/file.json' })`
+5. **Runtime** — `addSynonymGroup(['term1', 'term2'])`
+
+```json
+{ "groups": [["myToken", "MT", "My Token"]] }
+```
+
+## Supersession Chains
+
+```javascript
+const [old] = await mem.remember('BTC is 50k');
+const [updated] = await mem.remember('BTC is 60k', { supersedes: [old.id] });
+const chain = await mem.getSupersessionChain(old.id); // [old, updated]
+```
+
+```bash
+node scripts/engram.js remember "BTC is 60k" --supersedes ep_default_123_abc
+node scripts/engram.js chain ep_default_123_abc
+```
+
+Superseded episodes score ×0.3 by default. Use `includeSuperseded: true` for full history.
+
 ## API Reference
 
 ### `new AgentMemory(opts)`
@@ -90,6 +125,7 @@ node scripts/engram.js migrate
 | `importanceDecay` | `0.95` | Daily importance decay factor |
 | `chunkMode` | `'sentence'` | `'sentence'`, `'paragraph'`, or `'fixed'` |
 | `maxChunkTokens` | `256` | Max tokens per chunk |
+| `synonymsFile` | `null` | Path to custom synonyms JSON |
 
 ### Methods
 
@@ -104,6 +140,8 @@ node scripts/engram.js migrate
 | `getStats()` | `object` | Memory statistics |
 | `prune(opts)` | `{ pruned }` | Cleanup old/low-importance |
 | `temporal(query, opts)` | `Episode[]` | Natural language time queries |
+| `rememberSuperseding(text, ids, opts)` | `Episode[]` | Store + mark old as superseded |
+| `getSupersessionChain(id)` | `Episode[]` | Full supersession chain |
 | `summarize(ids, text, opts)` | `Episode` | Compress episodes into summary |
 | `createHooks()` | `object` | Auto-capture hooks for tool calls |
 

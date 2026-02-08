@@ -8,6 +8,9 @@ import { createEpisode, chunk, tokenize, contentHash, EPISODE_TYPES } from './co
 import { QueryEngine } from './query.js';
 import { FileStorage } from './storage/file.js';
 import { parseTemporalQuery } from './temporal.js';
+import { initSynonyms, loadCustomSynonyms } from './synonyms.js';
+import { existsSync } from 'fs';
+import { join } from 'path';
 
 export class AgentMemory {
   /**
@@ -21,6 +24,7 @@ export class AgentMemory {
    * @param {string} opts.chunkMode - 'sentence'|'paragraph'|'fixed' (default: 'sentence')
    * @param {number} opts.maxChunkTokens - max tokens per chunk (default: 256)
    * @param {number} opts.synonymWeight - weight for synonym matches (default: 0.5)
+   * @param {string} opts.synonymsFile - path to custom synonyms JSON file (optional)
    */
   constructor(opts = {}) {
     this.agentId = opts.agentId || 'default';
@@ -28,10 +32,13 @@ export class AgentMemory {
     this.maxChunkTokens = opts.maxChunkTokens || 256;
     this._initialized = false;
     this._initMode = null; // 'full' | 'incremental'
+    this._synonymsFile = opts.synonymsFile || null;
 
     // Storage backend
     this._redisConfig = opts.redis || null;
-    this.storage = opts.redis ? null : new FileStorage(opts.basePath || 'memory/engram');
+    const basePath = opts.basePath || 'memory/engram';
+    this._basePath = basePath;
+    this.storage = opts.redis ? null : new FileStorage(basePath);
 
     // Query engine
     this.engine = new QueryEngine({
@@ -48,6 +55,17 @@ export class AgentMemory {
    */
   async init() {
     if (this._initialized) return;
+
+    // Initialize synonyms: defaults → env → agent dataDir → explicit file
+    await initSynonyms();
+    const dataDirSynonyms = join(this._basePath, 'synonyms.json');
+    if (existsSync(dataDirSynonyms)) {
+      await loadCustomSynonyms(dataDirSynonyms);
+    }
+    if (this._synonymsFile) {
+      await loadCustomSynonyms(this._synonymsFile);
+    }
+
     if (!this.storage && this._redisConfig) {
       const { RedisStorage } = await import('./storage/redis.js');
       this.storage = new RedisStorage(this._redisConfig);
@@ -117,22 +135,39 @@ export class AgentMemory {
   async remember(text, opts = {}) {
     await this.init();
 
+    const { supersedes, ...restOpts } = opts;
     const chunks = chunk(text, { mode: this.chunkMode, maxTokens: this.maxChunkTokens });
     const sourceId = contentHash(text);
     const episodes = [];
 
     for (let i = 0; i < chunks.length; i++) {
       const ep = createEpisode(chunks[i], {
-        ...opts,
+        ...restOpts,
         agentId: this.agentId,
         chunkIndex: i,
         totalChunks: chunks.length,
         sourceId,
+        supersedes: i === 0 ? supersedes : undefined, // only first chunk carries supersedes
       });
       await this.storage.saveEpisode(ep);
       await this.storage.addToTagIndex(ep);
       this.engine.addDocument(ep);
       episodes.push(ep);
+    }
+
+    // Mark superseded episodes
+    if (supersedes && Array.isArray(supersedes) && supersedes.length > 0 && episodes.length > 0) {
+      const newId = episodes[0].id;
+      for (const oldId of supersedes) {
+        const oldEp = await this.storage.getEpisode(oldId);
+        if (oldEp) {
+          if (!oldEp.supersededBy) oldEp.supersededBy = [];
+          if (!oldEp.supersededBy.includes(newId)) {
+            oldEp.supersededBy.push(newId);
+          }
+          await this.storage.saveEpisode(oldEp);
+        }
+      }
     }
 
     // Persist updated index
@@ -142,10 +177,32 @@ export class AgentMemory {
   }
 
   /**
+   * Store a memory that supersedes existing episodes.
+   * Convenience method combining remember + supersession marking.
+   * @param {string} text
+   * @param {string[]} oldEpisodeIds - IDs of episodes being superseded
+   * @param {object} opts - same as remember()
+   * @returns {object[]} created episodes
+   */
+  async rememberSuperseding(text, oldEpisodeIds, opts = {}) {
+    return this.remember(text, { ...opts, supersedes: oldEpisodeIds });
+  }
+
+  /**
+   * Get the supersession chain for an episode.
+   * @param {string} episodeId
+   * @returns {object[]} chain from oldest to newest
+   */
+  async getSupersessionChain(episodeId) {
+    await this.init();
+    return QueryEngine.getSupersessionChain(episodeId, this.storage);
+  }
+
+  /**
    * Search memories using BM25 + recency + synonym expansion.
    * Episodes are loaded on-demand (lazy) from search results only.
    * @param {string} query
-   * @param {object} opts - { limit, tags, type, after, before, minImportance }
+   * @param {object} opts - { limit, tags, type, after, before, minImportance, includeSuperseded }
    * @returns {object[]} episodes with scores
    */
   async recall(query, opts = {}) {

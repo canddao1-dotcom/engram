@@ -28,13 +28,17 @@ async function main() {
   switch (command) {
     case 'remember': {
       const text = positional[1];
-      if (!text) { console.error('Usage: engram remember "text" [--type fact] [--tags a,b]'); process.exit(1); }
+      if (!text) { console.error('Usage: engram remember "text" [--type fact] [--tags a,b] [--supersedes id1,id2]'); process.exit(1); }
       const tags = flags.tags ? flags.tags.split(',') : [];
       const type = flags.type || 'fact';
       const importance = parseFloat(flags.importance || '0.5');
-      const eps = await mem.remember(text, { type, tags, importance });
+      const supersedes = flags.supersedes ? flags.supersedes.split(',') : undefined;
+      const eps = await mem.remember(text, { type, tags, importance, supersedes });
       console.log(`✓ Stored ${eps.length} episode(s)`);
-      for (const ep of eps) console.log(`  ${ep.id} [${ep.type}]`);
+      for (const ep of eps) {
+        console.log(`  ${ep.id} [${ep.type}]`);
+        if (ep.supersedes) console.log(`    supersedes: ${ep.supersedes.join(', ')}`);
+      }
       break;
     }
 
@@ -127,6 +131,22 @@ async function main() {
       break;
     }
 
+    case 'chain': {
+      const id = positional[1];
+      if (!id) { console.error('Usage: engram chain <episode-id>'); process.exit(1); }
+      const chain = await mem.getSupersessionChain(id);
+      if (!chain.length) { console.log('No supersession chain found.'); break; }
+      console.log(`Supersession chain (${chain.length} episodes):`);
+      for (let i = 0; i < chain.length; i++) {
+        const ep = chain[i];
+        const date = new Date(ep.createdAt).toISOString().split('T')[0];
+        const arrow = i < chain.length - 1 ? ' → superseded by' : ' (current)';
+        const marker = ep.supersededBy ? '✗' : '✓';
+        console.log(`  ${marker} ${ep.id} [${date}] ${ep.text.slice(0, 80)}${ep.text.length > 80 ? '...' : ''}${arrow}`);
+      }
+      break;
+    }
+
     case 'migrate': {
       // Delegate to migrate script
       const { migrate } = await import('./migrate.js');
@@ -148,6 +168,7 @@ Commands:
   stats               Memory statistics
   prune               Cleanup old/low-importance memories
   forget <id>         Delete a specific memory
+  chain <id>          Show supersession chain for an episode
   migrate             Import existing memory/*.md files
 
 Flags:
@@ -157,6 +178,7 @@ Flags:
   --limit <n>         Result limit
   --max-tokens <n>    Max tokens for context
   --keep <n>          Keep N best memories (prune)
+  --supersedes <ids>  Comma-separated episode IDs to supersede
   --path <dir>        Storage directory
   --agent <id>        Agent ID
 `);

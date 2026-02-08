@@ -4,6 +4,12 @@
 
 ## Changelog
 
+### v1.2.0 (2026-02-08)
+
+**Configurable Synonyms** — Synonym groups are now loaded from `config/synonyms.json` instead of being hardcoded. Supports layered loading: built-in defaults → `ENGRAM_SYNONYMS` env var → `<dataDir>/synonyms.json` → explicit `synonymsFile` option → runtime `addSynonymGroup()`. Each layer merges, never replaces.
+
+**Supersession Chains** — Episodes can now supersede other episodes via `supersedes` field. Superseded episodes rank 70% lower in search by default. Use `includeSuperseded: true` for full history. `getSupersessionChain(id)` walks the full chain. CLI: `engram remember "new fact" --supersedes ep_xxx` and `engram chain ep_xxx`.
+
 ### v1.1.0 (2026-02-08)
 
 **Incremental BM25 Index** — The BM25 index is now persisted to `memory/engram/index/bm25-index.json` and updated incrementally on startup instead of rebuilding from scratch. Falls back to full rebuild if the index is missing or corrupt.
@@ -11,17 +17,6 @@
 **Domain Synonym Expansion** — BM25 queries now expand terms using domain-aware synonym groups (Flare ecosystem tokens, DeFi concepts, protocol names). "FXRP allocation" now matches episodes containing "Flare XRP position". Original terms weighted 1.0, synonyms weighted 0.5. Custom synonyms supported via `addSynonymGroup()` or JSON file.
 
 **Lazy Episode Loading** — Episodes are loaded on-demand from disk only when they appear in search results, rather than all being held in memory.
-
-## Why Engram Exists
-
-AI agents wake up fresh every session. Engram gives them persistent, searchable, structured memory that survives restarts — stored as plain JSON files, searchable via BM25, with recency boosting and temporal reasoning.
-
-Inspired by [Clawnch's CLAWS](https://clawn.ch/memory) but rebuilt from scratch for OpenClaw:
-- **Zero npm dependencies** (Clawnch's CLAWS requires Upstash Redis)
-- **File-based by default** (works offline, zero infra)
-- **OpenClaw-native** (integrates with `memory/YYYY-MM-DD.md` and `MEMORY.md` patterns)
-- **Domain-aware** (DeFi episode types: `trade`, `position`, `alert`, `decision`, `lesson`)
-- **Temporal reasoning** (natural language time queries: "what happened last Tuesday?")
 
 ## Quick Start
 
@@ -36,11 +31,11 @@ await mem.remember('User prefers dark mode', { type: 'fact', tags: ['preferences
 // Search (BM25 + recency boosting)
 const results = await mem.recall('user preferences');
 
+// Supersede old info
+await mem.rememberSuperseding('User prefers light mode now', [results[0].id]);
+
 // Build LLM context
 const context = await mem.buildContext('current settings', { maxTokens: 2000 });
-
-// Temporal query
-const yesterday = await mem.temporal('what happened yesterday');
 ```
 
 ## CLI Usage
@@ -51,30 +46,69 @@ cd skills/engram
 # Store a memory
 node scripts/engram.js remember "User prefers dark mode" --type fact --tags preferences,ui
 
+# Store with supersession
+node scripts/engram.js remember "FXRP price is 3.0" --supersedes ep_default_123_abc
+
+# Show supersession chain
+node scripts/engram.js chain ep_default_123_abc
+
 # Search
 node scripts/engram.js recall "user preferences" --limit 5
 
-# Recent memories
-node scripts/engram.js recent --limit 10
-
-# Temporal query
-node scripts/engram.js temporal "what happened yesterday"
-
-# Build LLM context
-node scripts/engram.js context "current positions" --max-tokens 2000
-
 # Statistics
 node scripts/engram.js stats
-
-# Prune old memories (keep best 1000)
-node scripts/engram.js prune --keep 1000
-
-# Delete specific memory
-node scripts/engram.js forget ep_default_1707000000_abc123
-
-# Migrate existing memory/*.md files
-node scripts/engram.js migrate
 ```
+
+## Configurable Synonyms
+
+Default synonyms live in `config/synonyms.json`. Loading order (each merges):
+
+1. **Built-in defaults** — `config/synonyms.json`
+2. **Environment variable** — `ENGRAM_SYNONYMS=/path/to/custom.json`
+3. **Agent data dir** — `<basePath>/synonyms.json` (auto-loaded if exists)
+4. **Constructor option** — `new AgentMemory({ synonymsFile: '/path/to/file.json' })`
+5. **Runtime** — `addSynonymGroup(['term1', 'term2', 'term3'])`
+
+### Custom synonyms file format
+
+```json
+{
+  "groups": [
+    ["myToken", "MY", "My Token"],
+    ["protocol", "proto", "the protocol"]
+  ]
+}
+```
+
+Or flat array format: `[["term1", "term2"], ["term3", "term4"]]`
+
+### Agent-specific vocabulary
+
+Place a `synonyms.json` in your agent's data directory (`<basePath>/synonyms.json`). It will be auto-loaded on init, merged with defaults.
+
+## Supersession Chains
+
+When facts change, supersede old episodes instead of deleting them:
+
+```javascript
+// Original
+const [old] = await mem.remember('BTC price is 50k');
+
+// Correction — old episode gets supersededBy field, ranks lower in search
+const [updated] = await mem.remember('BTC price is 60k', { supersedes: [old.id] });
+
+// Convenience method
+const [v3] = await mem.rememberSuperseding('BTC price is 65k', [updated.id]);
+
+// View the chain
+const chain = await mem.getSupersessionChain(old.id);
+// → [old, updated, v3]
+
+// Include superseded in search (full history)
+const all = await mem.recall('BTC price', { includeSuperseded: true });
+```
+
+Superseded episodes get their score multiplied by 0.3 by default, so current info always ranks first.
 
 ## API Reference
 
@@ -82,14 +116,11 @@ node scripts/engram.js migrate
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `agentId` | `'default'` | Agent identifier for namespacing |
+| `agentId` | `'default'` | Agent identifier |
 | `basePath` | `'memory/engram'` | Storage directory |
-| `redis` | `null` | `{ url, token }` for Upstash Redis |
-| `recencyWeight` | `0.3` | 0-1, weight of recency vs BM25 |
-| `recencyLambda` | `0.1` | Decay rate (~10 day half-life) |
-| `importanceDecay` | `0.95` | Daily importance decay factor |
-| `chunkMode` | `'sentence'` | `'sentence'`, `'paragraph'`, or `'fixed'` |
-| `maxChunkTokens` | `256` | Max tokens per chunk |
+| `synonymsFile` | `null` | Path to custom synonyms JSON |
+| `recencyWeight` | `0.3` | 0-1, recency vs BM25 weight |
+| `synonymWeight` | `0.5` | Weight for synonym matches |
 
 ### Methods
 
@@ -97,97 +128,27 @@ node scripts/engram.js migrate
 |--------|---------|-------------|
 | `remember(text, opts)` | `Episode[]` | Store with auto-chunking |
 | `recall(query, opts)` | `Episode[]` | BM25 search + recency boost |
+| `rememberSuperseding(text, oldIds, opts)` | `Episode[]` | Store + mark old as superseded |
+| `getSupersessionChain(id)` | `Episode[]` | Get full supersession chain |
 | `buildContext(query, opts)` | `string` | LLM-ready context string |
 | `getRecent(limit)` | `Episode[]` | Latest memories |
-| `findByTag(tag)` | `Episode[]` | Tag-based lookup |
 | `forget(id)` | `boolean` | Delete a memory |
 | `getStats()` | `object` | Memory statistics |
 | `prune(opts)` | `{ pruned }` | Cleanup old/low-importance |
 | `temporal(query, opts)` | `Episode[]` | Natural language time queries |
-| `summarize(ids, text, opts)` | `Episode` | Compress episodes into summary |
-| `createHooks()` | `object` | Auto-capture hooks for tool calls |
 
-### Episode Schema
+### Episode Schema (v1.2)
 
 ```json
 {
   "id": "ep_default_1707000000_abc123",
-  "text": "User prefers dark mode",
+  "text": "FXRP price is 3.0 USDT",
   "type": "fact",
-  "tags": ["preferences"],
+  "tags": ["fxrp"],
   "importance": 0.5,
-  "agentId": "default",
-  "metadata": {},
+  "supersedes": ["ep_default_1706000000_def456"],
+  "supersededBy": ["ep_default_1708000000_ghi789"],
   "createdAt": 1707000000000,
-  "lastAccessedAt": 1707000000000,
-  "accessCount": 0,
-  "tokens": ["user", "prefer", "dark", "mode"]
+  "tokens": ["fxrp", "price", "3.0", "usdt"]
 }
 ```
-
-### Episode Types
-
-| Type | Use Case |
-|------|----------|
-| `fact` | Persistent knowledge |
-| `conversation` | Chat summaries |
-| `document` | Ingested documents |
-| `event` | Things that happened |
-| `custom` | Anything else |
-| `summary` | Compressed memories |
-| `trade` | Trade executions |
-| `position` | Portfolio changes |
-| `alert` | Triggered alerts |
-| `decision` | Decisions + rationale |
-| `lesson` | Lessons learned |
-
-## Storage Backends
-
-### FileStorage (default)
-
-Episodes stored as individual JSON files in `memory/engram/episodes/`. Tag index in `memory/engram/index/tags.json`. BM25 index rebuilt on startup (fast — thousands of episodes in <1s).
-
-### RedisStorage (optional)
-
-```javascript
-const mem = new AgentMemory({
-  redis: { url: 'https://your-redis.upstash.io', token: 'your-token' }
-});
-```
-
-Drop-in replacement. Same interface. Uses Upstash REST API (no npm deps).
-
-## Auto-Capture Hooks
-
-```javascript
-const hooks = mem.createHooks();
-
-// After a trade
-await hooks.onTrade({ action: 'buy', amount: 100, token: 'FXRP', price: 2.5 });
-
-// After a decision
-await hooks.onDecision({ description: 'Increased FXRP position', rationale: 'Bullish FTSO data' });
-
-// After learning something
-await hooks.onLesson({ lesson: 'Always check gas fees before bridging' });
-```
-
-## Scoring
-
-**BM25:** `score = IDF(term) × (tf × (k1 + 1)) / (tf + k1 × (1 - b + b × dl/avgdl))`
-
-**Recency:** `recencyScore = exp(-λ × daysSinceCreation)`
-
-**Combined:** `finalScore = ((1 - recencyWeight) × bm25 + recencyWeight × recency) × (0.5 + currentImportance)`
-
-**Importance Decay:** `importance = base × 0.95^daysSinceLastAccess` (reinforced by access)
-
-## Migration
-
-Import existing `memory/YYYY-MM-DD.md` files and `MEMORY.md`:
-
-```bash
-node scripts/engram.js migrate
-```
-
-Splits by `## ` headers, preserves dates as tags, assigns appropriate importance levels.

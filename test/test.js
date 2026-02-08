@@ -7,7 +7,7 @@ import { tokenize, chunk, idf, bm25Score, createEpisode, contentHash, termFreque
 import { QueryEngine } from '../src/query.js';
 import { parseTemporalQuery } from '../src/temporal.js';
 import { AgentMemory } from '../src/agent.js';
-import { expandQuery, addSynonymGroup } from '../src/synonyms.js';
+import { expandQuery, addSynonymGroup, initSynonyms, getSynonymGroupCount } from '../src/synonyms.js';
 import { FileStorage } from '../src/storage/file.js';
 import { rm, readFile } from 'fs/promises';
 import { join } from 'path';
@@ -330,6 +330,92 @@ section('Lazy Loading: episodes loaded on-demand');
     assert(!doc.text, 'engine does NOT store full text (lazy)');
 
     console.log('\n✓ Lazy loading tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+// ─── Configurable Synonyms Test ──────────────────────────────────
+section('Configurable Synonyms: initSynonyms + defaults');
+{
+  await initSynonyms();
+  const count = getSynonymGroupCount();
+  assert(count > 30, `loaded ${count} default synonym groups from config/synonyms.json`);
+
+  // Verify synonym expansion still works after init
+  const r = expandQuery('FXRP allocation');
+  assert(r.expanded.length > 0, 'synonyms work after initSynonyms()');
+}
+
+// ─── Supersession Chain Test ─────────────────────────────────────
+section('Supersession: basic chain');
+{
+  const testPath = join(process.cwd(), '.engram-super-test-' + Date.now());
+
+  try {
+    const mem = new AgentMemory({ agentId: 'test', basePath: testPath });
+
+    // Store original fact
+    const [orig] = await mem.remember('FXRP price is 2.0 USDT', { type: 'fact', tags: ['fxrp'] });
+    assert(orig.id, 'original episode created');
+    assert(!orig.supersedes, 'original has no supersedes');
+
+    // Supersede with updated fact
+    const [updated] = await mem.remember('FXRP price is 2.5 USDT', {
+      type: 'fact', tags: ['fxrp'], supersedes: [orig.id],
+    });
+    assert(updated.supersedes.includes(orig.id), 'new episode supersedes original');
+
+    // Check old episode was marked
+    const oldEp = await mem.storage.getEpisode(orig.id);
+    assert(oldEp.supersededBy && oldEp.supersededBy.includes(updated.id), 'old episode has supersededBy');
+
+    // Search should rank superseded lower
+    const results = await mem.recall('FXRP price', { limit: 10 });
+    assert(results.length === 2, 'both episodes found');
+    assert(results[0].id === updated.id, 'current episode ranks first');
+    assert(results[0]._score > results[1]._score, 'superseded episode has lower score');
+
+    // includeSuperseded should give full scores
+    const allResults = await mem.recall('FXRP price', { limit: 10, includeSuperseded: true });
+    assert(allResults.length === 2, 'includeSuperseded returns both');
+
+    console.log('\n✓ Supersession basic tests passed');
+  } finally {
+    await rm(testPath, { recursive: true, force: true });
+  }
+}
+
+section('Supersession: chain traversal');
+{
+  const testPath = join(process.cwd(), '.engram-chain-test-' + Date.now());
+
+  try {
+    const mem = new AgentMemory({ agentId: 'test', basePath: testPath });
+
+    // Create a chain: v1 → v2 → v3
+    const [v1] = await mem.remember('Fact v1', { type: 'fact' });
+    const [v2] = await mem.remember('Fact v2', { type: 'fact', supersedes: [v1.id] });
+    const [v3] = await mem.remember('Fact v3', { type: 'fact', supersedes: [v2.id] });
+
+    // Get chain from v1
+    const chain1 = await mem.getSupersessionChain(v1.id);
+    assert(chain1.length === 3, `chain from v1 has ${chain1.length} entries (expected 3)`);
+    assert(chain1[0].id === v1.id, 'chain starts with v1');
+    assert(chain1[2].id === v3.id, 'chain ends with v3');
+
+    // Get chain from v2 (middle)
+    const chain2 = await mem.getSupersessionChain(v2.id);
+    assert(chain2.length === 3, `chain from v2 has ${chain2.length} entries (expected 3)`);
+
+    // rememberSuperseding convenience method
+    const [v4] = await mem.rememberSuperseding('Fact v4', [v3.id]);
+    assert(v4.supersedes.includes(v3.id), 'rememberSuperseding works');
+
+    const chain3 = await mem.getSupersessionChain(v1.id);
+    assert(chain3.length === 4, `full chain has ${chain3.length} entries (expected 4)`);
+
+    console.log('\n✓ Supersession chain tests passed');
   } finally {
     await rm(testPath, { recursive: true, force: true });
   }
